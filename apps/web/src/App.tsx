@@ -1,18 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
-import Canvas2D, { type BeamResults } from './components/Canvas2D';
+import Canvas2D, { type ResultPoint } from './components/Canvas2D';
 
 // =============================================================================
 // WASM Solver Integration
 // =============================================================================
 
-type SolveFn = (input: string) => string;
-let solveStructure: SolveFn | null = null;
+type SolveFn = (input: any) => any;
+let solveMeshFn: SolveFn | null = null;
 
 async function initWasm(): Promise<SolveFn | null> {
   try {
     const wasmModule = await import('solver-wasm');
     await wasmModule.default();
-    return wasmModule.solve_structure;
+    return wasmModule.solve_mesh;
   } catch (err) {
     console.warn('[StructurAI] WASM module not available, using mock solver:', err);
     return null;
@@ -20,63 +20,61 @@ async function initWasm(): Promise<SolveFn | null> {
 }
 
 // Mock solver for development without WASM
-function mockSolver(input: string): string {
+function mockSolver(inputModel: any): any {
   try {
-    const model = JSON.parse(input);
-    const element = model.geometry.elements[0];
-    const startNode = model.geometry.nodes.find((n: { id: string }) => n.id === element.startNode);
-    const endNode = model.geometry.nodes.find((n: { id: string }) => n.id === element.endNode);
-    const length = Math.sqrt(
-      Math.pow(endNode.x - startNode.x, 2) + Math.pow(endNode.z - startNode.z, 2)
-    );
-    const q = Math.abs(model.loads[0]?.value || 10);
-    const E = 210_000_000; // kN/m²
-    const I = 1943e-8;     // m⁴ (IPE200)
+    const results: ResultPoint[] = [];
+    const nodes = inputModel.nodes;
+    const elements = inputModel.elements;
+    const distributed_loads = inputModel.distributed_loads;
 
-    const reaction = (q * length) / 2;
-    const maxMoment = (q * length * length) / 8;
-    const maxShear = reaction;
-    const maxDeflection = (5 * q * Math.pow(length, 4)) / (384 * E * I) * 1000;
+    for (let i = 0; i < elements.length; i++) {
+      const el = elements[i];
+      const startNode = nodes.find((n: any) => n.id === el.start_node_id);
+      const endNode = nodes.find((n: any) => n.id === el.end_node_id);
+      const length = endNode.x - startNode.x;
 
-    const numStations = 21;
-    const momentDiagram: number[] = [];
-    const shearDiagram: number[] = [];
-    const deflectionDiagram: number[] = [];
+      const load = distributed_loads.find((ld: any) => ld.element_id === el.id);
+      const q = Math.abs(load?.value || 10);
+      const E = el.e;
+      const I = el.i_inertia;
 
-    for (let i = 0; i < numStations; i++) {
-      const t = i / (numStations - 1);
-      const x = t * length;
+      // Simple parabolic approximation for fallback
+      const numPoints = 50;
+      for (let step = 0; step <= numPoints; step++) {
+        const x_loc = (step / numPoints) * length;
+        // deflection: 5qL^4/(384EI) * sin(pi*x/L)
+        const deflMax = (5 * q * 1000 * Math.pow(length, 4)) / (384 * E * I) * 1000; // mm
+        const deflection = -deflMax * Math.sin((Math.PI * x_loc) / length);
 
-      momentDiagram.push(
-        Math.round(((q * length * x) / 2 - (q * x * x) / 2) * 1000) / 1000
-      );
-      shearDiagram.push(
-        Math.round(((q * length) / 2 - q * x) * 1000) / 1000
-      );
-      const defl = (q / (24 * E * I)) * x * (Math.pow(length, 3) - 2 * length * x * x + Math.pow(x, 3));
-      deflectionDiagram.push(Math.round(defl * 1000 * 1000) / 1000);
+        // moment: qLx/2 - qx^2/2
+        const moment = -((q * length * x_loc) / 2 - (q * x_loc * x_loc) / 2);
+
+        // shear: qL/2 - qx
+        const shear = -((q * length) / 2 - q * x_loc);
+
+        results.push({
+          global_x: startNode.x + x_loc,
+          deflection,
+          moment,
+          shear,
+        });
+      }
     }
 
-    return JSON.stringify({
+    return {
       success: true,
       error: null,
-      results: [{
-        element_id: element.id,
-        length,
-        reaction_left: Math.round(reaction * 1000) / 1000,
-        reaction_right: Math.round(reaction * 1000) / 1000,
-        max_moment: Math.round(maxMoment * 1000) / 1000,
-        max_moment_position: length / 2,
-        max_shear: Math.round(maxShear * 1000) / 1000,
-        max_deflection: Math.round(maxDeflection * 1000) / 1000,
-        moment_diagram: momentDiagram,
-        shear_diagram: shearDiagram,
-        deflection_diagram: deflectionDiagram,
-      }],
-    });
-  } catch {
-    return JSON.stringify({ success: false, error: 'Mock solver parse error', results: [] });
+      results,
+    };
+  } catch (e) {
+    return { success: false, error: 'Mock solver parse error: ' + e, results: [] };
   }
+}
+
+interface Support {
+  id: string;
+  x: number;
+  type: 'Pinned' | 'Fixed';
 }
 
 // =============================================================================
@@ -86,17 +84,21 @@ function mockSolver(input: string): string {
 export default function App() {
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState(false);
-  const [results, setResults] = useState<BeamResults | null>(null);
+  const [results, setResults] = useState<ResultPoint[] | null>(null);
   const [beamLength, setBeamLength] = useState(5.0);
   const [loadValue, setLoadValue] = useState(10.0);
   const [sectionId, setSectionId] = useState('IPE200');
   const [solveTimeMs, setSolveTimeMs] = useState<number | null>(null);
+  const [supports, setSupports] = useState<Support[]>([
+    { id: 'S1', x: 0, type: 'Pinned' },
+    { id: 'S2', x: 5.0, type: 'Pinned' },
+  ]);
 
   // Initialize WASM
   useEffect(() => {
     initWasm().then((fn) => {
       if (fn) {
-        solveStructure = fn;
+        solveMeshFn = fn;
         setWasmReady(true);
       } else {
         setWasmError(true);
@@ -105,52 +107,112 @@ export default function App() {
     });
   }, []);
 
+  // Update edge supports positions when beamLength changes
+  useEffect(() => {
+    setSupports(prev => {
+      return prev.map((s, idx) => {
+        if (idx === 0) return { ...s, x: 0 };
+        if (idx === prev.length - 1) return { ...s, x: beamLength };
+        // Clamp intermediate supports to be within the beam span
+        return { ...s, x: Math.min(Math.max(s.x, 0.5), beamLength - 0.5) };
+      });
+    });
+  }, [beamLength]);
+
+  const addSupport = () => {
+    if (supports.length >= 10) return;
+    const newX = parseFloat((beamLength / 2).toFixed(1));
+    setSupports(prev => {
+      const next = [...prev];
+      const end = next.pop()!;
+      next.push({
+        id: `S_int_${Date.now()}`,
+        x: newX,
+        type: 'Pinned'
+      });
+      next.sort((a, b) => a.x - b.x);
+      next.push(end);
+      return next;
+    });
+  };
+
+  const removeSupport = (id: string) => {
+    setSupports(prev => {
+      if (prev[0].id === id || prev[prev.length - 1].id === id) return prev;
+      return prev.filter(s => s.id !== id);
+    });
+  };
+
+  const updateSupportX = (id: string, x: number) => {
+    setSupports(prev => {
+      return prev.map((s, idx) => {
+        if (s.id !== id) return s;
+        if (idx === 0 || idx === prev.length - 1) return s;
+        const clampedX = Math.min(Math.max(x, 0.5), beamLength - 0.5);
+        return { ...s, x: parseFloat(clampedX.toFixed(1)) };
+      });
+    });
+  };
+
+  const updateSupportType = (id: string, type: 'Pinned' | 'Fixed') => {
+    setSupports(prev => {
+      return prev.map(s => (s.id === id ? { ...s, type } : s));
+    });
+  };
+
   // Solve function
   const solve = useCallback(() => {
-    const input = JSON.stringify({
-      project_id: 'poc-001',
-      geometry: {
-        nodes: [
-          { id: 'N1', x: 0.0, z: 0.0, support: 'pinned' },
-          { id: 'N2', x: beamLength, z: 0.0, support: 'roller_x' },
-        ],
-        elements: [
-          {
-            id: 'E1',
-            startNode: 'N1',
-            endNode: 'N2',
-            section_id: sectionId,
-            material_id: 'S235',
-          },
-        ],
-      },
-      loads: [
-        {
-          type: 'distributed',
-          element: 'E1',
-          value: -loadValue,
-          direction: 'global_Z',
-        },
-      ],
-    });
+    // Sort nodes by X coordinate
+    const sortedSupports = [...supports].sort((a, b) => a.x - b.x);
+
+    const nodes = sortedSupports.map((s, idx) => ({
+      id: `N${idx}`,
+      x: s.x,
+      support_type: s.type,
+    }));
+
+    // Elements connecting consecutive nodes
+    const elements = [];
+    let E = 210e9; // steel Young's modulus
+    let I = 1.943e-5; // standard IPE200 moment of inertia
+    if (sectionId === 'IPE300') { I = 8.356e-5; }
+    else if (sectionId === 'IPE400') { I = 2.313e-4; }
+    else if (sectionId === 'HEB200') { I = 5.696e-5; }
+    else if (sectionId === 'HEB300') { I = 2.517e-4; }
+
+    for (let i = 0; i < nodes.length - 1; i++) {
+      elements.push({
+        id: `E${i}`,
+        start_node_id: nodes[i].id,
+        end_node_id: nodes[i + 1].id,
+        e: E,
+        i_inertia: I,
+      });
+    }
+
+    const distributed_loads = elements.map(el => ({
+      element_id: el.id,
+      value: -loadValue,
+    }));
+
+    const inputModel = {
+      nodes,
+      elements,
+      distributed_loads,
+    };
 
     const t0 = performance.now();
-    const resultJson = solveStructure ? solveStructure(input) : mockSolver(input);
+    const output = solveMeshFn ? solveMeshFn(inputModel) : mockSolver(inputModel);
     const t1 = performance.now();
     setSolveTimeMs(Math.round((t1 - t0) * 100) / 100);
 
-    try {
-      const output = JSON.parse(resultJson);
-      if (output.success && output.results.length > 0) {
-        setResults(output.results[0]);
-        console.log('[StructurAI] Solver output:', output.results[0]);
-      } else {
-        console.error('[StructurAI] Solver error:', output.error);
-      }
-    } catch (e) {
-      console.error('[StructurAI] JSON parse error:', e);
+    if (output && output.success) {
+      setResults(output.results);
+      console.log('[StructurAI] Solver output points count:', output.results.length);
+    } else {
+      console.error('[StructurAI] Solver error:', output?.error);
     }
-  }, [beamLength, loadValue, sectionId]);
+  }, [beamLength, loadValue, sectionId, supports]);
 
   // Auto-solve on parameter change (real-time!)
   useEffect(() => {
@@ -228,7 +290,7 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <Canvas2D results={results} beamLength={beamLength} load={loadValue} />
+            <Canvas2D results={results} supports={supports} beamLength={beamLength} load={loadValue} />
           )}
         </div>
 
@@ -256,6 +318,86 @@ export default function App() {
                 className="param-range"
               />
               <span className="param-value mono-value">{beamLength.toFixed(1)}</span>
+            </div>
+          </div>
+
+          {/* Supports */}
+          <div className="properties-panel__section">
+            <div className="properties-panel__section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>Podpory belki</span>
+              <button 
+                className="btn btn--primary" 
+                onClick={addSupport} 
+                style={{ padding: '2px 8px', fontSize: '11px', height: 'auto', borderRadius: '4px' }}
+                disabled={supports.length >= 8}
+              >
+                + Dodaj
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+              {supports.map((s, idx) => {
+                const isStart = idx === 0;
+                const isEnd = idx === supports.length - 1;
+                const isEdge = isStart || isEnd;
+                return (
+                  <div key={s.id} style={{ 
+                    background: 'rgba(255,255,255,0.03)', 
+                    padding: '8px 12px', 
+                    borderRadius: '8px', 
+                    border: '1px solid rgba(255,255,255,0.06)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#94a3b8' }}>
+                        Węzeł N{idx + 1} ({isStart ? 'Start' : isEnd ? 'Koniec' : `x = ${s.x.toFixed(1)}m`})
+                      </span>
+                      {!isEdge && (
+                        <button 
+                          onClick={() => removeSupport(s.id)}
+                          style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '11px', cursor: 'pointer', padding: 0 }}
+                        >
+                          Usuń
+                        </button>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '4px' }}>
+                      {!isEdge && (
+                        <input
+                          type="range"
+                          min="0.5"
+                          max={beamLength - 0.5}
+                          step="0.1"
+                          value={s.x}
+                          onChange={(e) => updateSupportX(s.id, parseFloat(e.target.value))}
+                          style={{ flex: 1, accentColor: '#3b82f6', height: '4px' }}
+                        />
+                      )}
+                      
+                      <select
+                        value={s.type}
+                        onChange={(e) => updateSupportType(s.id, e.target.value as 'Pinned' | 'Fixed')}
+                        className="param-select"
+                        style={{ 
+                          padding: '2px 6px', 
+                          fontSize: '11px', 
+                          height: '24px', 
+                          width: '100px', 
+                          background: 'rgba(0,0,0,0.3)',
+                          border: '1px solid rgba(255,255,255,0.1)',
+                          borderRadius: '4px',
+                          color: '#e2e8f0'
+                        }}
+                      >
+                        <option value="Pinned">Przegub</option>
+                        <option value="Fixed">Utwierdzenie</option>
+                      </select>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -301,43 +443,41 @@ export default function App() {
           </div>
 
           {/* Results */}
-          {results && (
-            <div className="properties-panel__section">
-              <div className="properties-panel__section-title">Wyniki Analizy</div>
+          {results && (() => {
+            const maxDeflection = Math.max(...results.map(r => Math.abs(r.deflection)));
+            const maxMoment = Math.max(...results.map(r => Math.abs(r.moment)));
+            const maxShear = Math.max(...results.map(r => Math.abs(r.shear)));
 
-              <div className="result-card result-card--reaction">
-                <div className="result-card__label">Reakcja podpór</div>
-                <div className="result-card__value">
-                  {results.reaction_left.toFixed(2)}
-                  <span className="result-card__unit">kN</span>
+            return (
+              <div className="properties-panel__section">
+                <div className="properties-panel__section-title">Wyniki Analizy</div>
+
+                <div className="result-card result-card--moment">
+                  <div className="result-card__label">Moment zginający max</div>
+                  <div className="result-card__value">
+                    {maxMoment.toFixed(2)}
+                    <span className="result-card__unit">kNm</span>
+                  </div>
+                </div>
+
+                <div className="result-card result-card--shear">
+                  <div className="result-card__label">Siła tnąca max</div>
+                  <div className="result-card__value">
+                    {maxShear.toFixed(2)}
+                    <span className="result-card__unit">kN</span>
+                  </div>
+                </div>
+
+                <div className="result-card result-card--deflection">
+                  <div className="result-card__label">Ugięcie max</div>
+                  <div className="result-card__value">
+                    {maxDeflection.toFixed(3)}
+                    <span className="result-card__unit">mm</span>
+                  </div>
                 </div>
               </div>
-
-              <div className="result-card result-card--moment">
-                <div className="result-card__label">Moment zginający max</div>
-                <div className="result-card__value">
-                  {results.max_moment.toFixed(2)}
-                  <span className="result-card__unit">kNm</span>
-                </div>
-              </div>
-
-              <div className="result-card result-card--shear">
-                <div className="result-card__label">Siła tnąca max</div>
-                <div className="result-card__value">
-                  {results.max_shear.toFixed(2)}
-                  <span className="result-card__unit">kN</span>
-                </div>
-              </div>
-
-              <div className="result-card result-card--deflection">
-                <div className="result-card__label">Ugięcie max</div>
-                <div className="result-card__value">
-                  {results.max_deflection.toFixed(3)}
-                  <span className="result-card__unit">mm</span>
-                </div>
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </aside>
       </div>
 
@@ -346,10 +486,10 @@ export default function App() {
         <div className="status-bar__left">
           <div className="status-bar__indicator">
             <div className="status-bar__dot" />
-            <span>Solver gotowy</span>
+            <span>Solver MES gotowy</span>
           </div>
-          <span className="mono-value">
-            Element: E1 | {sectionId} | S235
+          <span className="mono-value" style={{ fontSize: '11px' }}>
+            Przęsła: {supports.length - 1} | {sectionId} | S235
           </span>
         </div>
         <div className="status-bar__right">

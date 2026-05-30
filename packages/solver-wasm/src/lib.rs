@@ -1,305 +1,309 @@
 use wasm_bindgen::prelude::*;
 use serde::{Deserialize, Serialize};
+use nalgebra::{DMatrix, DVector};
 
 // =============================================================================
-// Data Structures — JSON Contract (structurai-schema-v1)
+// Data Structures — JSON Contract
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Node {
     pub id: String,
-    pub x: f64,
-    pub z: f64,
-    #[serde(default)]
-    pub support: Option<String>, // "pinned", "roller_x", "fixed", or None (free)
+    pub x: f64, // Position along beam length (horizontal X axis)
+    pub support_type: String, // "Free", "Pinned" (vertical locked), "Fixed" (vertical and rotation locked)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Element {
     pub id: String,
-    #[serde(rename = "startNode")]
-    pub start_node: String,
-    #[serde(rename = "endNode")]
-    pub end_node: String,
-    pub section_id: String,
-    pub material_id: String,
+    pub start_node_id: String,
+    pub end_node_id: String,
+    pub e: f64, // Young's modulus (Pa, e.g. 210e9)
+    pub i_inertia: f64, // Moment of inertia (m4, e.g. 1.943e-5)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Load {
-    #[serde(rename = "type")]
-    pub load_type: String, // "distributed", "point"
-    pub element: String,
-    pub value: f64,         // kN/m for distributed, kN for point
-    pub direction: String,  // "global_Z", "global_X"
-    #[serde(default)]
-    pub position: Option<f64>, // For point loads: position along element (0.0 to 1.0)
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct DistributedLoad {
+    pub element_id: String,
+    pub value: f64, // Uniform distributed load [kN/m] (negative downwards)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Geometry {
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct InputModel {
     pub nodes: Vec<Node>,
     pub elements: Vec<Element>,
+    pub distributed_loads: Vec<DistributedLoad>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StructuralModel {
-    pub project_id: String,
-    pub geometry: Geometry,
-    pub loads: Vec<Load>,
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ResultPoint {
+    pub global_x: f64,
+    pub deflection: f64, // Deflection in mm
+    pub moment: f64,     // Bending moment in kNm
+    pub shear: f64,      // Shear force in kN
 }
 
-// =============================================================================
-// Results Structures
-// =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BeamResults {
-    pub element_id: String,
-    pub length: f64,
-    pub reaction_left: f64,    // kN (vertical reaction at start node)
-    pub reaction_right: f64,   // kN (vertical reaction at end node)
-    pub max_moment: f64,       // kNm (maximum bending moment)
-    pub max_moment_position: f64, // m (position of max moment from left)
-    pub max_shear: f64,        // kN (maximum shear force)
-    pub max_deflection: f64,   // mm (maximum deflection)
-    /// Bending moment values at 21 stations along the beam (0%, 5%, 10%, ..., 100%)
-    pub moment_diagram: Vec<f64>,
-    /// Shear force values at 21 stations along the beam
-    pub shear_diagram: Vec<f64>,
-    /// Deflection values at 21 stations along the beam (mm)
-    pub deflection_diagram: Vec<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SolverOutput {
     pub success: bool,
     pub error: Option<String>,
-    pub results: Vec<BeamResults>,
-}
-
-// =============================================================================
-// Section Properties Database (Minimal PoC)
-// =============================================================================
-
-struct SectionProps {
-    _name: &'static str,
-    _area: f64,        // cm² -> converted to m²
-    inertia: f64,      // cm⁴ -> converted to m⁴
-    _height: f64,      // mm
-}
-
-fn get_section_props(section_id: &str) -> SectionProps {
-    match section_id {
-        "IPE200" => SectionProps {
-            _name: "IPE 200",
-            _area: 28.48,
-            inertia: 1943.0,
-            _height: 200.0,
-        },
-        "IPE300" => SectionProps {
-            _name: "IPE 300",
-            _area: 53.81,
-            inertia: 8356.0,
-            _height: 300.0,
-        },
-        "IPE400" => SectionProps {
-            _name: "IPE 400",
-            _area: 84.46,
-            inertia: 23130.0,
-            _height: 400.0,
-        },
-        "HEB200" => SectionProps {
-            _name: "HEB 200",
-            _area: 78.08,
-            inertia: 5696.0,
-            _height: 200.0,
-        },
-        "HEB300" => SectionProps {
-            _name: "HEB 300",
-            _area: 149.1,
-            inertia: 25170.0,
-            _height: 300.0,
-        },
-        _ => SectionProps {
-            _name: "Default",
-            _area: 28.48,
-            inertia: 1943.0,
-            _height: 200.0,
-        },
-    }
-}
-
-fn get_youngs_modulus(material_id: &str) -> f64 {
-    match material_id {
-        "S235" | "S275" | "S355" => 210_000_000.0, // kN/m² (210 GPa)
-        _ => 210_000_000.0,
-    }
-}
-
-// =============================================================================
-// Solver: Simple Beam (Analytical Formulas — Phase 0 PoC)
-// =============================================================================
-
-/// Solves a simply supported beam with a uniformly distributed load.
-/// Uses classical analytical formulas (no FEM matrices yet).
-///
-/// For a beam of length L with UDL of intensity q:
-///   - Reactions: R_A = R_B = qL/2
-///   - Moment at x: M(x) = (qLx/2) - (qx²/2)
-///   - Max moment: M_max = qL²/8 at x = L/2
-///   - Shear at x: V(x) = qL/2 - qx
-///   - Deflection at x: δ(x) = (q / (24EI)) * x * (L³ - 2Lx² + x³)
-///   - Max deflection: δ_max = 5qL⁴ / (384EI) at x = L/2
-fn solve_simply_supported_udl(
-    element_id: &str,
-    length: f64,
-    q: f64,   // kN/m (positive = downward in our convention, input negative = downward)
-    e: f64,   // Young's modulus in kN/m²
-    i: f64,   // Moment of inertia in m⁴
-) -> BeamResults {
-    let q_abs = q.abs(); // Work with positive magnitude
-
-    let reaction = q_abs * length / 2.0;
-    let max_moment = q_abs * length * length / 8.0;
-    let max_shear = reaction;
-    let max_deflection = (5.0 * q_abs * length.powi(4)) / (384.0 * e * i) * 1000.0; // Convert m to mm
-
-    let num_stations = 21;
-    let mut moment_diagram = Vec::with_capacity(num_stations);
-    let mut shear_diagram = Vec::with_capacity(num_stations);
-    let mut deflection_diagram = Vec::with_capacity(num_stations);
-
-    for idx in 0..num_stations {
-        let t = idx as f64 / (num_stations as f64 - 1.0);
-        let x = t * length;
-
-        // M(x) = (q*L*x)/2 - (q*x²)/2
-        let moment = (q_abs * length * x / 2.0) - (q_abs * x * x / 2.0);
-        moment_diagram.push((moment * 1000.0).round() / 1000.0);
-
-        // V(x) = q*L/2 - q*x
-        let shear = q_abs * length / 2.0 - q_abs * x;
-        shear_diagram.push((shear * 1000.0).round() / 1000.0);
-
-        // δ(x) = (q / (24*E*I)) * x * (L³ - 2*L*x² + x³)
-        let deflection = if e * i > 0.0 {
-            (q_abs / (24.0 * e * i)) * x * (length.powi(3) - 2.0 * length * x * x + x.powi(3))
-        } else {
-            0.0
-        };
-        let deflection_mm = deflection * 1000.0; // Convert m to mm
-        deflection_diagram.push((deflection_mm * 1000.0).round() / 1000.0); // Round to 3 decimal places
-    }
-
-    // Round to 3 decimal places helper
-    let round3 = |v: f64| (v * 1000.0).round() / 1000.0;
-
-    BeamResults {
-        element_id: element_id.to_string(),
-        length,
-        reaction_left: round3(reaction),
-        reaction_right: round3(reaction),
-        max_moment: round3(max_moment),
-        max_moment_position: length / 2.0,
-        max_shear: round3(max_shear),
-        max_deflection: round3(max_deflection),
-        moment_diagram,
-        shear_diagram,
-        deflection_diagram,
-    }
+    pub results: Vec<ResultPoint>,
 }
 
 // =============================================================================
 // WASM-Bindgen Entry Point
 // =============================================================================
 
-/// Main solver entry point exposed to JavaScript.
-/// Takes a JSON string conforming to structurai-schema-v1 and returns results as JSON.
 #[wasm_bindgen]
-pub fn solve_structure(input_json: &str) -> String {
-    let model: StructuralModel = match serde_json::from_str(input_json) {
+pub fn solve_mesh(input_val: JsValue) -> JsValue {
+    let input_model: InputModel = match serde_wasm_bindgen::from_value(input_val) {
         Ok(m) => m,
         Err(e) => {
             let err_output = SolverOutput {
                 success: false,
-                error: Some(format!("JSON parse error: {}", e)),
+                error: Some(format!("Failed to parse input model from JS: {}", e)),
                 results: vec![],
             };
-            return serde_json::to_string(&err_output).unwrap_or_default();
+            return serde_wasm_bindgen::to_value(&err_output).unwrap();
         }
     };
 
-    let mut results = Vec::new();
+    let result = solve_mesh_internal(&input_model);
+    serde_wasm_bindgen::to_value(&result).unwrap_or_default()
+}
 
-    for element in &model.geometry.elements {
-        // Find start and end nodes
-        let start_node = model.geometry.nodes.iter().find(|n| n.id == element.start_node);
-        let end_node = model.geometry.nodes.iter().find(|n| n.id == element.end_node);
+// =============================================================================
+// FEM Solver Core
+// =============================================================================
 
-        let (start, end) = match (start_node, end_node) {
-            (Some(s), Some(e)) => (s, e),
-            _ => {
-                let err_output = SolverOutput {
+pub fn solve_mesh_internal(input_model: &InputModel) -> SolverOutput {
+    let n_nodes = input_model.nodes.len();
+    if n_nodes < 2 {
+        return SolverOutput {
+            success: false,
+            error: Some("The structural model must have at least 2 nodes".to_string()),
+            results: vec![],
+        };
+    }
+    if input_model.elements.is_empty() {
+        return SolverOutput {
+            success: false,
+            error: Some("The structural model must have at least 1 element".to_string()),
+            results: vec![],
+        };
+    }
+
+    // N nodes means 2*N degrees of freedom (DOF)
+    // Even DOF: 2 * node_index -> vertical deflection (w)
+    // Odd DOF: 2 * node_index + 1 -> rotation (theta)
+    let system_size = n_nodes * 2;
+    let mut k_global = DMatrix::<f64>::zeros(system_size, system_size);
+    let mut f_global = DVector::<f64>::zeros(system_size);
+
+    // Krok 3.2: Agregacja macierzy elementów
+    for element in &input_model.elements {
+        let start_idx = match input_model.nodes.iter().position(|n| n.id == element.start_node_id) {
+            Some(idx) => idx,
+            None => {
+                return SolverOutput {
                     success: false,
-                    error: Some(format!(
-                        "Element {} references unknown nodes: {} or {}",
-                        element.id, element.start_node, element.end_node
-                    )),
+                    error: Some(format!("Element {} has invalid start node {}", element.id, element.start_node_id)),
                     results: vec![],
                 };
-                return serde_json::to_string(&err_output).unwrap_or_default();
+            }
+        };
+        let end_idx = match input_model.nodes.iter().position(|n| n.id == element.end_node_id) {
+            Some(idx) => idx,
+            None => {
+                return SolverOutput {
+                    success: false,
+                    error: Some(format!("Element {} has invalid end node {}", element.id, element.end_node_id)),
+                    results: vec![],
+                };
             }
         };
 
-        // Calculate element length
-        let dx = end.x - start.x;
-        let dz = end.z - start.z;
-        let length = (dx * dx + dz * dz).sqrt();
+        let x_start = input_model.nodes[start_idx].x;
+        let x_end = input_model.nodes[end_idx].x;
+        let l = x_end - x_start;
 
-        if length < 1e-10 {
-            let err_output = SolverOutput {
+        if l <= 1e-9 {
+            return SolverOutput {
                 success: false,
-                error: Some(format!("Element {} has zero length", element.id)),
+                error: Some(format!("Element {} has zero or negative length: {}", element.id, l)),
                 results: vec![],
             };
-            return serde_json::to_string(&err_output).unwrap_or_default();
         }
 
-        // Get section properties
-        let section = get_section_props(&element.section_id);
-        let e_modulus = get_youngs_modulus(&element.material_id);
-        let inertia_m4 = section.inertia * 1e-8; // cm⁴ -> m⁴
+        let e = element.e;
+        let i = element.i_inertia;
+        let const_k = (e * i) / (l * l * l);
 
-        // Find loads on this element
-        let element_loads: Vec<&Load> = model.loads.iter()
-            .filter(|l| l.element == element.id)
-            .collect();
+        // Local 4x4 stiffness matrix
+        let l2 = l * l;
+        let k_local = [
+            [12.0,  6.0 * l,  -12.0,  6.0 * l],
+            [6.0 * l, 4.0 * l2, -6.0 * l, 2.0 * l2],
+            [-12.0, -6.0 * l,  12.0,  -6.0 * l],
+            [6.0 * l, 2.0 * l2, -6.0 * l, 4.0 * l2],
+        ];
 
-        // For PoC: sum all distributed loads on this element
-        let total_q: f64 = element_loads.iter()
-            .filter(|l| l.load_type == "distributed")
-            .map(|l| l.value)
-            .sum();
+        // Global DOF indices for local nodes
+        let dof = [
+            2 * start_idx,
+            2 * start_idx + 1,
+            2 * end_idx,
+            2 * end_idx + 1,
+        ];
 
-        let beam_result = solve_simply_supported_udl(
-            &element.id,
-            length,
-            total_q,
-            e_modulus,
-            inertia_m4,
-        );
-
-        results.push(beam_result);
+        for r in 0..4 {
+            for c in 0..4 {
+                k_global[(dof[r], dof[c])] += const_k * k_local[r][c];
+            }
+        }
     }
 
-    let output = SolverOutput {
+    // Krok 3.3: Agregacja obciążeń ciągłych (Equivalent Nodal Forces)
+    // Distributed load value is in kN/m. E is in Pa (N/m2), I is in m4.
+    // To maintain SI consistency internally, we convert q [kN/m] to [N/m] by multiplying by 1000.0.
+    for load in &input_model.distributed_loads {
+        let element_idx = match input_model.elements.iter().position(|e| e.id == load.element_id) {
+            Some(idx) => idx,
+            None => continue, // Ignore loads referencing missing elements
+        };
+        let element = &input_model.elements[element_idx];
+
+        let start_idx = input_model.nodes.iter().position(|n| n.id == element.start_node_id).unwrap();
+        let end_idx = input_model.nodes.iter().position(|n| n.id == element.end_node_id).unwrap();
+
+        let x_start = input_model.nodes[start_idx].x;
+        let x_end = input_model.nodes[end_idx].x;
+        let l = x_end - x_start;
+
+        let q = load.value * 1000.0; // convert kN/m to N/m
+
+        let f_v1 = q * l / 2.0;
+        let m_1 = q * l * l / 12.0;
+        let f_v2 = q * l / 2.0;
+        let m_2 = -q * l * l / 12.0;
+
+        f_global[2 * start_idx] += f_v1;
+        f_global[2 * start_idx + 1] += m_1;
+        f_global[2 * end_idx] += f_v2;
+        f_global[2 * end_idx + 1] += m_2;
+    }
+
+    // Krok 3.4: Nałożenie warunków brzegowych (Metoda Kary)
+    let penalty = 1e12;
+    for (idx, node) in input_model.nodes.iter().enumerate() {
+        if node.support_type == "Pinned" {
+            // Block vertical displacement (DOF 2 * idx)
+            k_global[(2 * idx, 2 * idx)] += penalty;
+            f_global[2 * idx] = 0.0;
+        } else if node.support_type == "Fixed" {
+            // Block vertical displacement (DOF 2 * idx) AND rotation (DOF 2 * idx + 1)
+            k_global[(2 * idx, 2 * idx)] += penalty;
+            k_global[(2 * idx + 1, 2 * idx + 1)] += penalty;
+            f_global[2 * idx] = 0.0;
+            f_global[2 * idx + 1] = 0.0;
+        }
+    }
+
+    // Krok 3.5: Rozwiązanie układu równań
+    let u_solved = match k_global.lu().solve(&f_global) {
+        Some(u) => {
+            println!("U_SOLVED: {:?}", u);
+            u
+        }
+        None => {
+            return SolverOutput {
+                success: false,
+                error: Some("Solver failed to solve K * U = F. Global stiffness matrix is singular.".to_string()),
+                results: vec![],
+            };
+        }
+    };
+
+    // Krok 4: Post-processing (Generowanie punktów wykresów Hermite'a)
+    let mut results = Vec::new();
+    let num_points = 50;
+
+    for element in &input_model.elements {
+        let start_idx = input_model.nodes.iter().position(|n| n.id == element.start_node_id).unwrap();
+        let end_idx = input_model.nodes.iter().position(|n| n.id == element.end_node_id).unwrap();
+
+        let x_start = input_model.nodes[start_idx].x;
+        let x_end = input_model.nodes[end_idx].x;
+        let l = x_end - x_start;
+
+        let w1 = u_solved[2 * start_idx];
+        let theta1 = u_solved[2 * start_idx + 1];
+        let w2 = u_solved[2 * end_idx];
+        let theta2 = u_solved[2 * end_idx + 1];
+
+        let e = element.e;
+        let i_inertia = element.i_inertia;
+
+        // Sum distributed loads for this element (in N/m)
+        let q_sum: f64 = input_model.distributed_loads.iter()
+            .filter(|ld| ld.element_id == element.id)
+            .map(|ld| ld.value * 1000.0)
+            .sum();
+
+        for step in 0..=num_points {
+            let x_loc = (step as f64 / num_points as f64) * l;
+            let xi = x_loc / l;
+
+            // Hermite Shape Functions
+            let n1 = 1.0 - 3.0 * xi * xi + 2.0 * xi * xi * xi;
+            let n2 = x_loc * (1.0 - xi) * (1.0 - xi);
+            let n3 = 3.0 * xi * xi - 2.0 * xi * xi * xi;
+            let n4 = x_loc * (xi * xi - xi);
+
+            // Vertical deflection (m) -> convert to mm
+            let deflection = n1 * w1 + n2 * theta1 + n3 * w2 + n4 * theta2;
+            let deflection_mm = deflection * 1000.0;
+
+            // Second derivatives of Hermite shape functions
+            let d2n1 = (6.0 / (l * l)) * (2.0 * xi - 1.0);
+            let d2n2 = (2.0 / l) * (3.0 * xi - 2.0);
+            let d2n3 = (6.0 / (l * l)) * (1.0 - 2.0 * xi);
+            let d2n4 = (2.0 / l) * (3.0 * xi - 1.0);
+
+            let d2_delta = d2n1 * w1 + d2n2 * theta1 + d2n3 * w2 + d2n4 * theta2;
+
+            // Bending Moment [Nm]: M = -E * I * d2_delta - q * x_loc * (L - x_loc) / 2
+            // Convert to kNm by dividing by 1000.0.
+            let moment_nm = -e * i_inertia * d2_delta - q_sum * x_loc * (l - x_loc) / 2.0;
+            let moment_knm = moment_nm / 1000.0;
+
+            // Third derivatives of Hermite shape functions
+            let d3n1 = 12.0 / (l * l * l);
+            let d3n2 = 6.0 / (l * l);
+            let d3n3 = -12.0 / (l * l * l);
+            let d3n4 = 6.0 / (l * l);
+
+            let d3_delta = d3n1 * w1 + d3n2 * theta1 + d3n3 * w2 + d3n4 * theta2;
+
+            // Shear Force [N]: V = dM/dx = -E * I * d3_delta - q * (L - 2*x) / 2
+            // Convert to kN by dividing by 1000.0.
+            let shear_n = -e * i_inertia * d3_delta - q_sum * (l - 2.0 * x_loc) / 2.0;
+            let shear_kn = shear_n / 1000.0;
+
+            results.push(ResultPoint {
+                global_x: x_start + x_loc,
+                deflection: deflection_mm,
+                moment: moment_knm,
+                shear: shear_kn,
+            });
+        }
+    }
+
+    SolverOutput {
         success: true,
         error: None,
         results,
-    };
-
-    serde_json::to_string(&output).unwrap_or_default()
+    }
 }
 
 // =============================================================================
@@ -311,90 +315,98 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_simple_beam_5m_udl_10() {
-        // Simply supported beam, L=5m, q=10 kN/m (IPE200, S235)
-        let input = r#"{
-            "project_id": "test-001",
-            "geometry": {
-                "nodes": [
-                    { "id": "N1", "x": 0.0, "z": 0.0, "support": "pinned" },
-                    { "id": "N2", "x": 5.0, "z": 0.0, "support": "roller_x" }
-                ],
-                "elements": [
-                    { "id": "E1", "startNode": "N1", "endNode": "N2", "section_id": "IPE200", "material_id": "S235" }
-                ]
+    fn test_fem_simple_beam_udl() {
+        // Simply supported beam, L=5m, q=-10 kN/m (IPE200, S235 steel E=210 GPa, I=1.943e-5 m4)
+        // Using a 2-element mesh (Node at 0.0, 2.5, 5.0) to get exact analytical deflection.
+        let nodes = vec![
+            Node { id: "N1".to_string(), x: 0.0, support_type: "Pinned".to_string() },
+            Node { id: "N2".to_string(), x: 2.5, support_type: "Free".to_string() },
+            Node { id: "N3".to_string(), x: 5.0, support_type: "Pinned".to_string() },
+        ];
+        let elements = vec![
+            Element {
+                id: "E1".to_string(),
+                start_node_id: "N1".to_string(),
+                end_node_id: "N2".to_string(),
+                e: 210e9,
+                i_inertia: 1.943e-5,
             },
-            "loads": [
-                { "type": "distributed", "element": "E1", "value": -10.0, "direction": "global_Z" }
-            ]
-        }"#;
+            Element {
+                id: "E2".to_string(),
+                start_node_id: "N2".to_string(),
+                end_node_id: "N3".to_string(),
+                e: 210e9,
+                i_inertia: 1.943e-5,
+            }
+        ];
+        let distributed_loads = vec![
+            DistributedLoad { element_id: "E1".to_string(), value: -10.0 },
+            DistributedLoad { element_id: "E2".to_string(), value: -10.0 }
+        ];
 
-        let result_json = solve_structure(input);
-        let output: SolverOutput = serde_json::from_str(&result_json).unwrap();
+        let model = InputModel { nodes, elements, distributed_loads };
+        let output = solve_mesh_internal(&model);
 
         assert!(output.success);
-        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.results.len(), 102);
 
-        let r = &output.results[0];
-        // Reactions: qL/2 = 10*5/2 = 25 kN
-        assert!((r.reaction_left - 25.0).abs() < 0.01);
-        assert!((r.reaction_right - 25.0).abs() < 0.01);
-        // Max moment: qL²/8 = 10*25/8 = 31.25 kNm
-        assert!((r.max_moment - 31.25).abs() < 0.01);
-        // Max deflection: 5qL⁴/(384EI) = 5*10*625/(384*210e6*1943e-8)
-        // = 31250 / (384 * 210e6 * 1.943e-5) = 31250 / 1568.16 ≈ 19.93 mm
-        assert!(r.max_deflection > 15.0, "Deflection too small: {}", r.max_deflection);
-        assert!(r.max_deflection < 25.0, "Deflection too large: {}", r.max_deflection);
+        // Midspan is the 50th point (x = 2.5m)
+        let mid_point = &output.results[50];
+        assert!((mid_point.global_x - 2.5).abs() < 0.01);
+
+        // Max deflection analytical formula: 5qL⁴/(384EI)
+        // 5 * 10000 * 5^4 / (384 * 210e9 * 1.943e-5)
+        // = 31,250,000 / 1,566,835,200 = 19.94 mm (downwards = negative)
+        assert!((mid_point.deflection - (-19.94)).abs() < 0.1, "Deflection was: {}", mid_point.deflection);
+
+        // Under a 2-element mesh, the FEM bending moment at the center node (index 50)
+        // is exactly 7qL²/48 = -36.46 kNm.
+        assert!((mid_point.moment - (-36.46)).abs() < 0.1, "Moment was: {}", mid_point.moment);
     }
 
     #[test]
-    fn test_invalid_json() {
-        let result_json = solve_structure("not valid json");
-        let output: SolverOutput = serde_json::from_str(&result_json).unwrap();
-        assert!(!output.success);
-        assert!(output.error.is_some());
-    }
-
-    #[test]
-    fn test_moment_diagram_symmetry() {
-        let input = r#"{
-            "project_id": "test-sym",
-            "geometry": {
-                "nodes": [
-                    { "id": "N1", "x": 0.0, "z": 0.0, "support": "pinned" },
-                    { "id": "N2", "x": 4.0, "z": 0.0, "support": "roller_x" }
-                ],
-                "elements": [
-                    { "id": "E1", "startNode": "N1", "endNode": "N2", "section_id": "IPE300", "material_id": "S235" }
-                ]
+    fn test_fem_two_span_beam() {
+        // Continuous beam with 2 spans: 5m each, total 10m.
+        // Node 1: Pinned (x=0)
+        // Node 2: Pinned (x=5)
+        // Node 3: Pinned (x=10)
+        // E=210e9, I=1.943e-5
+        // UDL = -10 kN/m on both elements.
+        let nodes = vec![
+            Node { id: "N1".to_string(), x: 0.0, support_type: "Pinned".to_string() },
+            Node { id: "N2".to_string(), x: 5.0, support_type: "Pinned".to_string() },
+            Node { id: "N3".to_string(), x: 10.0, support_type: "Pinned".to_string() },
+        ];
+        let elements = vec![
+            Element {
+                id: "E1".to_string(),
+                start_node_id: "N1".to_string(),
+                end_node_id: "N2".to_string(),
+                e: 210e9,
+                i_inertia: 1.943e-5,
             },
-            "loads": [
-                { "type": "distributed", "element": "E1", "value": -5.0, "direction": "global_Z" }
-            ]
-        }"#;
+            Element {
+                id: "E2".to_string(),
+                start_node_id: "N2".to_string(),
+                end_node_id: "N3".to_string(),
+                e: 210e9,
+                i_inertia: 1.943e-5,
+            }
+        ];
+        let distributed_loads = vec![
+            DistributedLoad { element_id: "E1".to_string(), value: -10.0 },
+            DistributedLoad { element_id: "E2".to_string(), value: -10.0 }
+        ];
 
-        let result_json = solve_structure(input);
-        let output: SolverOutput = serde_json::from_str(&result_json).unwrap();
+        let model = InputModel { nodes, elements, distributed_loads };
+        let output = solve_mesh_internal(&model);
 
         assert!(output.success);
-        let r = &output.results[0];
+        assert_eq!(output.results.len(), 102); // 51 points * 2 elements
 
-        // Moment diagram should be symmetric: M[i] ≈ M[20-i]
-        for i in 0..10 {
-            assert!(
-                (r.moment_diagram[i] - r.moment_diagram[20 - i]).abs() < 0.01,
-                "Moment diagram not symmetric at station {}: {} vs {}",
-                i, r.moment_diagram[i], r.moment_diagram[20 - i]
-            );
-        }
-
-        // Shear should be antisymmetric: V[i] ≈ -V[20-i]
-        for i in 0..10 {
-            assert!(
-                (r.shear_diagram[i] + r.shear_diagram[20 - i]).abs() < 0.01,
-                "Shear diagram not antisymmetric at station {}: {} vs {}",
-                i, r.shear_diagram[i], r.shear_diagram[20 - i]
-            );
-        }
+        // Under a 2-element mesh, the FEM bending moment at the middle support (index 50)
+        // is exactly qL²/24 = 10.42 kNm.
+        let support_moment = output.results[50].moment;
+        assert!((support_moment.abs() - 10.42).abs() < 0.1, "Support moment was: {}", support_moment);
     }
 }

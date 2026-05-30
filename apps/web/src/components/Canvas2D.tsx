@@ -4,22 +4,22 @@ import { useRef, useEffect, useCallback } from 'react';
 // Types matching the Rust solver output
 // =============================================================================
 
-export interface BeamResults {
-  element_id: string;
-  length: number;
-  reaction_left: number;
-  reaction_right: number;
-  max_moment: number;
-  max_moment_position: number;
-  max_shear: number;
-  max_deflection: number;
-  moment_diagram: number[];
-  shear_diagram: number[];
-  deflection_diagram: number[];
+export interface ResultPoint {
+  global_x: number;
+  deflection: number; // in mm
+  moment: number;     // in kNm
+  shear: number;      // in kN
+}
+
+export interface Support {
+  id: string;
+  x: number;
+  type: 'Pinned' | 'Fixed';
 }
 
 interface Canvas2DProps {
-  results: BeamResults | null;
+  results: ResultPoint[] | null;
+  supports: Support[];
   beamLength: number;
   load: number;
 }
@@ -28,7 +28,7 @@ interface Canvas2DProps {
 // Canvas Drawing Engine
 // =============================================================================
 
-// Color palette
+// Color palette matching premium dark design
 const COLORS = {
   beam: '#e2e8f0',
   beamStroke: '#94a3b8',
@@ -42,13 +42,12 @@ const COLORS = {
   shearFill: 'rgba(6, 182, 212, 0.12)',
   deflection: '#f59e0b',
   deflectionFill: 'rgba(245, 158, 11, 0.12)',
-  grid: 'rgba(148, 163, 184, 0.06)',
-  gridMajor: 'rgba(148, 163, 184, 0.12)',
-  axis: 'rgba(148, 163, 184, 0.25)',
+  grid: 'rgba(148, 163, 184, 0.05)',
+  gridMajor: 'rgba(148, 163, 184, 0.1)',
+  axis: 'rgba(148, 163, 184, 0.2)',
   text: '#94a3b8',
   textBright: '#e2e8f0',
-  dimLine: 'rgba(148, 163, 184, 0.3)',
-  reaction: '#10b981',
+  dimLine: 'rgba(148, 163, 184, 0.25)',
 };
 
 function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number) {
@@ -124,89 +123,113 @@ function drawPinnedSupport(ctx: CanvasRenderingContext2D, x: number, y: number, 
   ctx.fill();
   ctx.stroke();
 
-  // Hatch lines under support
+  // Hatch lines under support base plate
   ctx.strokeStyle = COLORS.support;
   ctx.lineWidth = 1;
   const baseY = y + size;
   ctx.beginPath();
-  ctx.moveTo(x - size * 0.8, baseY + 4);
-  ctx.lineTo(x + size * 0.8, baseY + 4);
+  ctx.moveTo(x - size * 0.8, baseY + 3);
+  ctx.lineTo(x + size * 0.8, baseY + 3);
   ctx.stroke();
   for (let i = -3; i <= 3; i++) {
     const hx = x + i * (size * 0.2);
     ctx.beginPath();
-    ctx.moveTo(hx, baseY + 4);
-    ctx.lineTo(hx - 5, baseY + 10);
+    ctx.moveTo(hx, baseY + 3);
+    ctx.lineTo(hx - 4, baseY + 9);
     ctx.stroke();
   }
 }
 
-function drawRollerSupport(ctx: CanvasRenderingContext2D, x: number, y: number, size: number = 20) {
-  // Triangle
+function drawFixedSupportEdge(ctx: CanvasRenderingContext2D, x: number, y: number, isRightSide: boolean, size: number = 20) {
   ctx.strokeStyle = COLORS.support;
-  ctx.fillStyle = COLORS.supportFill;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 3.5;
+  ctx.lineCap = 'square';
+  
+  // Vertical heavy wall
   ctx.beginPath();
-  ctx.moveTo(x, y);
-  ctx.lineTo(x - size * 0.6, y + size);
-  ctx.lineTo(x + size * 0.6, y + size);
-  ctx.closePath();
-  ctx.fill();
+  ctx.moveTo(x, y - size * 0.7);
+  ctx.lineTo(x, y + size * 0.7);
   ctx.stroke();
 
-  // Roller circle
-  const circleY = y + size + 7;
-  ctx.beginPath();
-  ctx.arc(x, circleY, 5, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // Ground line
+  // Concrete hatches
   ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(x - size * 0.8, circleY + 7);
-  ctx.lineTo(x + size * 0.8, circleY + 7);
-  ctx.stroke();
+  const hatchSpacing = 4;
+  const hatchLen = 6;
+  const factor = isRightSide ? 1 : -1;
+  
+  for (let hy = y - size * 0.6; hy <= y + size * 0.6; hy += hatchSpacing) {
+    ctx.beginPath();
+    ctx.moveTo(x, hy);
+    ctx.lineTo(x + factor * hatchLen, hy - hatchLen);
+    ctx.stroke();
+  }
 }
 
-function drawDiagram(
+function drawFixedSupportIntermediate(ctx: CanvasRenderingContext2D, x: number, y: number, size: number = 20) {
+  ctx.strokeStyle = COLORS.support;
+  ctx.fillStyle = COLORS.supportFill;
+  ctx.lineWidth = 3.5;
+  
+  // Rigid heavy horizontal plate just under the beam
+  ctx.beginPath();
+  ctx.moveTo(x - size * 0.6, y);
+  ctx.lineTo(x + size * 0.6, y);
+  ctx.stroke();
+
+  // Downward hatches
+  ctx.lineWidth = 1;
+  for (let hx = x - size * 0.5; hx <= x + size * 0.5; hx += 4) {
+    ctx.beginPath();
+    ctx.moveTo(hx, y);
+    ctx.lineTo(hx - 4, y + 8);
+    ctx.stroke();
+  }
+}
+
+function drawMeshDiagram(
   ctx: CanvasRenderingContext2D,
-  values: number[],
-  startX: number, baseY: number, beamPixelLen: number,
+  points: ResultPoint[],
+  field: 'deflection' | 'moment' | 'shear',
+  startX: number, baseY: number, beamLength: number, beamPixelLen: number,
   scale: number,
   color: string, fillColor: string,
   label: string,
+  invertSign: boolean = false,
 ) {
-  const numStations = values.length;
+  if (points.length === 0) return;
 
-  // Fill
+  // Fill area under curve
   ctx.fillStyle = fillColor;
   ctx.beginPath();
   ctx.moveTo(startX, baseY);
-  for (let i = 0; i < numStations; i++) {
-    const t = i / (numStations - 1);
-    const px = startX + t * beamPixelLen;
-    const py = baseY - values[i] * scale;
-    if (i === 0) ctx.lineTo(px, py);
-    else ctx.lineTo(px, py);
+  
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const px = startX + (p.global_x / beamLength) * beamPixelLen;
+    const val = invertSign ? -p[field] : p[field];
+    const py = baseY - val * scale;
+    ctx.lineTo(px, py);
   }
+  
   ctx.lineTo(startX + beamPixelLen, baseY);
   ctx.closePath();
   ctx.fill();
 
-  // Stroke
+  // Stroke curve line
   ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2.0;
   ctx.beginPath();
-  for (let i = 0; i < numStations; i++) {
-    const t = i / (numStations - 1);
-    const px = startX + t * beamPixelLen;
-    const py = baseY - values[i] * scale;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const px = startX + (p.global_x / beamLength) * beamPixelLen;
+    const val = invertSign ? -p[field] : p[field];
+    const py = baseY - val * scale;
     if (i === 0) ctx.moveTo(px, py);
     else ctx.lineTo(px, py);
   }
   ctx.stroke();
 
-  // Baseline
+  // Axis baseline
   ctx.strokeStyle = COLORS.axis;
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 4]);
@@ -216,33 +239,48 @@ function drawDiagram(
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Max value label
-  const maxVal = Math.max(...values.map(Math.abs));
-  const maxIdx = values.findIndex(v => Math.abs(v) === maxVal);
-  if (maxIdx >= 0) {
-    const t = maxIdx / (numStations - 1);
-    const px = startX + t * beamPixelLen;
-    const py = baseY - values[maxIdx] * scale;
+  // Find extreme values and their points
+  const values = points.map(p => p[field]);
+  const maxVal = Math.max(...values);
+  const minVal = Math.min(...values);
 
-    ctx.fillStyle = color;
-    ctx.font = `600 12px 'JetBrains Mono', monospace`;
+  ctx.fillStyle = color;
+  ctx.font = `600 11px 'JetBrains Mono', monospace`;
+  
+  // Render max label if substantial
+  const maxIdx = values.indexOf(maxVal);
+  if (maxIdx >= 0 && Math.abs(maxVal) > 1e-2) {
+    const p = points[maxIdx];
+    const px = startX + (p.global_x / beamLength) * beamPixelLen;
+    const val = invertSign ? -maxVal : maxVal;
+    const py = baseY - val * scale;
     ctx.textAlign = 'center';
-    const sign = values[maxIdx] >= 0 ? '' : '-';
-    ctx.fillText(`${sign}${maxVal.toFixed(2)}`, px, py - 8);
+    ctx.fillText(maxVal.toFixed(2), px, py + (val >= 0 ? -6 : 14));
   }
 
-  // Label
+  // Render min label if substantial and distinct
+  const minIdx = values.indexOf(minVal);
+  if (minIdx >= 0 && minIdx !== maxIdx && Math.abs(minVal) > 1e-2) {
+    const p = points[minIdx];
+    const px = startX + (p.global_x / beamLength) * beamPixelLen;
+    const val = invertSign ? -minVal : minVal;
+    const py = baseY - val * scale;
+    ctx.textAlign = 'center';
+    ctx.fillText(minVal.toFixed(2), px, py + (val >= 0 ? -6 : 14));
+  }
+
+  // Diagram Label
   ctx.fillStyle = color;
-  ctx.font = `700 13px 'Inter', sans-serif`;
+  ctx.font = `700 12px 'Inter', sans-serif`;
   ctx.textAlign = 'left';
-  ctx.fillText(label, startX - 5, baseY - 55);
+  ctx.fillText(label, startX - 5, baseY - 50);
 }
 
 // =============================================================================
 // Canvas2D Component
 // =============================================================================
 
-export default function Canvas2D({ results, beamLength, load }: Canvas2DProps) {
+export default function Canvas2D({ results, supports, beamLength, load }: Canvas2DProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const draw = useCallback(() => {
@@ -266,32 +304,32 @@ export default function Canvas2D({ results, beamLength, load }: Canvas2DProps) {
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
 
-    // Draw grid
+    // Minor/major background grid
     drawGrid(ctx, w, h);
 
-    // Layout
+    // Sizing and layout
     const margin = { left: 80, right: 80, top: 60, bottom: 60 };
-    const beamY = margin.top + 80;
+    const beamY = margin.top + 60;
     const beamPixelLen = w - margin.left - margin.right;
     const startX = margin.left;
     const endX = startX + beamPixelLen;
 
-    // ======== Draw Beam ========
+    // ======== Draw Beam Body ========
     ctx.strokeStyle = COLORS.beamStroke;
     ctx.fillStyle = COLORS.beam;
     ctx.lineWidth = 3;
     ctx.lineCap = 'round';
 
-    // Beam shadow
-    ctx.shadowColor = 'rgba(59, 130, 246, 0.15)';
-    ctx.shadowBlur = 12;
+    // Premium glowing beam shadow
+    ctx.shadowColor = 'rgba(59, 130, 246, 0.12)';
+    ctx.shadowBlur = 10;
     ctx.beginPath();
     ctx.moveTo(startX, beamY);
     ctx.lineTo(endX, beamY);
     ctx.stroke();
-    ctx.shadowBlur = 0;
+    ctx.shadowBlur = 0; // reset shadow
 
-    // Beam rectangle (thick)
+    // Thick steel beam rectangle representation
     const beamThick = 8;
     ctx.fillStyle = COLORS.beam;
     ctx.beginPath();
@@ -301,127 +339,141 @@ export default function Canvas2D({ results, beamLength, load }: Canvas2DProps) {
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    // ======== Supports ========
-    drawPinnedSupport(ctx, startX, beamY + beamThick / 2);
-    drawRollerSupport(ctx, endX, beamY + beamThick / 2);
+    // ======== Draw Supports at actual X coords ========
+    supports.forEach((s, idx) => {
+      const px = startX + (s.x / beamLength) * beamPixelLen;
+      const isStart = idx === 0;
+      const isEnd = idx === supports.length - 1;
+      
+      if (s.type === 'Fixed') {
+        if (isStart) {
+          drawFixedSupportEdge(ctx, px, beamY, false, 20);
+        } else if (isEnd) {
+          drawFixedSupportEdge(ctx, px, beamY, true, 20);
+        } else {
+          drawFixedSupportIntermediate(ctx, px, beamY + beamThick / 2, 20);
+        }
+      } else {
+        // Pinned Support
+        drawPinnedSupport(ctx, px, beamY + beamThick / 2, 20);
+      }
+    });
 
-    // ======== Distributed Load ========
+    // ======== Distributed Uniform Load (UDL) ========
     if (load !== 0) {
       const loadColor = COLORS.load;
-      const numArrows = 12;
-      const arrowLen = 35;
-      const loadTop = beamY - beamThick / 2 - arrowLen - 10;
+      const numArrows = 16;
+      const arrowLen = 30;
+      const loadTop = beamY - beamThick / 2 - arrowLen - 8;
 
-      // Top line
+      // Draw continuous load line
       ctx.strokeStyle = loadColor;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(startX, loadTop);
       ctx.lineTo(endX, loadTop);
       ctx.stroke();
 
-      // Arrows
+      // Load pressure arrows
       ctx.fillStyle = loadColor;
       ctx.strokeStyle = loadColor;
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.2;
       for (let i = 0; i <= numArrows; i++) {
         const t = i / numArrows;
         const ax = startX + t * beamPixelLen;
-        drawArrow(ctx, ax, loadTop, ax, beamY - beamThick / 2 - 4, 7);
+        drawArrow(ctx, ax, loadTop, ax, beamY - beamThick / 2 - 3, 6);
       }
 
-      // Load value
+      // Load label
       ctx.fillStyle = COLORS.loadArrow;
-      ctx.font = `600 12px 'JetBrains Mono', monospace`;
+      ctx.font = `600 11px 'JetBrains Mono', monospace`;
       ctx.textAlign = 'center';
-      ctx.fillText(`q = ${Math.abs(load).toFixed(1)} kN/m`, (startX + endX) / 2, loadTop - 8);
+      ctx.fillText(`q = ${Math.abs(load).toFixed(1)} kN/m`, (startX + endX) / 2, loadTop - 7);
     }
 
-    // ======== Dimension Line ========
-    const dimY = beamY + 70;
+    // ======== Continuous Dimension Line ========
+    const dimY = beamY + 60;
     ctx.strokeStyle = COLORS.dimLine;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(startX, dimY);
     ctx.lineTo(endX, dimY);
     ctx.stroke();
-    // Ticks
+    
+    // Outer ticks
     ctx.beginPath();
-    ctx.moveTo(startX, dimY - 4);
-    ctx.lineTo(startX, dimY + 4);
-    ctx.moveTo(endX, dimY - 4);
-    ctx.lineTo(endX, dimY + 4);
+    ctx.moveTo(startX, dimY - 4); ctx.lineTo(startX, dimY + 4);
+    ctx.moveTo(endX, dimY - 4); ctx.lineTo(endX, dimY + 4);
     ctx.stroke();
+    
+    // Support ticks
+    supports.forEach((s) => {
+      const px = startX + (s.x / beamLength) * beamPixelLen;
+      ctx.beginPath();
+      ctx.moveTo(px, dimY - 3);
+      ctx.lineTo(px, dimY + 3);
+      ctx.stroke();
+    });
+
     // Length label
     ctx.fillStyle = COLORS.text;
-    ctx.font = `500 12px 'JetBrains Mono', monospace`;
+    ctx.font = `500 11px 'JetBrains Mono', monospace`;
     ctx.textAlign = 'center';
-    ctx.fillText(`L = ${beamLength.toFixed(1)} m`, (startX + endX) / 2, dimY + 18);
+    ctx.fillText(`L = ${beamLength.toFixed(1)} m`, (startX + endX) / 2, dimY + 16);
 
     // ======== Node Labels ========
     ctx.fillStyle = COLORS.text;
     ctx.font = `600 11px 'Inter', sans-serif`;
     ctx.textAlign = 'center';
-    ctx.fillText('N1', startX, beamY + 60);
-    ctx.fillText('N2', endX, beamY + 60);
+    supports.forEach((s, idx) => {
+      const px = startX + (s.x / beamLength) * beamPixelLen;
+      ctx.fillText(`N${idx + 1}`, px, beamY + 45);
+    });
 
     // ======== Results Diagrams ========
-    if (results) {
-      // Reaction arrows
-      ctx.fillStyle = COLORS.reaction;
-      ctx.strokeStyle = COLORS.reaction;
-      ctx.lineWidth = 2;
-      const reactionScale = 1.5;
-
-      // Left reaction (upward arrow)
-      const rLeftLen = results.reaction_left * reactionScale;
-      drawArrow(ctx, startX, beamY + 55, startX, beamY + 55 - rLeftLen, 9);
-      ctx.font = `600 11px 'JetBrains Mono', monospace`;
-      ctx.textAlign = 'center';
-      ctx.fillText(`R₁ = ${results.reaction_left.toFixed(2)} kN`, startX, beamY + 68);
-
-      // Right reaction
-      const rRightLen = results.reaction_right * reactionScale;
-      drawArrow(ctx, endX, beamY + 55, endX, beamY + 55 - rRightLen, 9);
-      ctx.fillText(`R₂ = ${results.reaction_right.toFixed(2)} kN`, endX, beamY + 68);
-
-      // Moment diagram
-      const momentBaseY = beamY + 150;
-      const maxMoment = Math.max(...results.moment_diagram.map(Math.abs));
-      const momentScale = maxMoment > 0 ? 50 / maxMoment : 1;
-      drawDiagram(
-        ctx, results.moment_diagram,
-        startX, momentBaseY, beamPixelLen,
+    if (results && results.length > 0) {
+      // 1. Bending Moment (M)
+      // Positive moment is plotted on the tension side (downwards in civil engineering)
+      const momentBaseY = beamY + 140;
+      const maxMoment = Math.max(...results.map(r => Math.abs(r.moment)));
+      const momentScale = maxMoment > 0 ? 45 / maxMoment : 1;
+      drawMeshDiagram(
+        ctx, results, 'moment',
+        startX, momentBaseY, beamLength, beamPixelLen,
         momentScale,
         COLORS.moment, COLORS.momentFill,
-        'M [kNm]',
+        'M [kNm] (włókna rozciągane)',
+        true, // invertSign = true so positive moment is drawn below axis
       );
 
-      // Shear diagram
-      const shearBaseY = beamY + 280;
-      const maxShear = Math.max(...results.shear_diagram.map(Math.abs));
-      const shearScale = maxShear > 0 ? 40 / maxShear : 1;
-      drawDiagram(
-        ctx, results.shear_diagram,
-        startX, shearBaseY, beamPixelLen,
+      // 2. Shear Force (V)
+      const shearBaseY = beamY + 265;
+      const maxShear = Math.max(...results.map(r => Math.abs(r.shear)));
+      const shearScale = maxShear > 0 ? 35 / maxShear : 1;
+      drawMeshDiagram(
+        ctx, results, 'shear',
+        startX, shearBaseY, beamLength, beamPixelLen,
         shearScale,
         COLORS.shear, COLORS.shearFill,
         'V [kN]',
+        false,
       );
 
-      // Deflection diagram (inverted — deflection downward)
-      const deflBaseY = beamY + 400;
-      const maxDefl = Math.max(...results.deflection_diagram.map(Math.abs));
-      const deflScale = maxDefl > 0 ? -35 / maxDefl : 1; // negative = draw downward
-      drawDiagram(
-        ctx, results.deflection_diagram,
-        startX, deflBaseY, beamPixelLen,
+      // 3. Deflection (δ)
+      // Deflection is naturally negative downward in the solver, so we don't invert it.
+      const deflBaseY = beamY + 380;
+      const maxDefl = Math.max(...results.map(r => Math.abs(r.deflection)));
+      const deflScale = maxDefl > 0 ? 30 / maxDefl : 1;
+      drawMeshDiagram(
+        ctx, results, 'deflection',
+        startX, deflBaseY, beamLength, beamPixelLen,
         deflScale,
         COLORS.deflection, COLORS.deflectionFill,
         'δ [mm]',
+        false,
       );
     }
-  }, [results, beamLength, load]);
+  }, [results, supports, beamLength, load]);
 
   useEffect(() => {
     draw();
