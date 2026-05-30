@@ -500,6 +500,50 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const handleSketchComplete = (newLength: number) => {
+    setBeamLength(newLength);
+    setActiveTool('select');
+  };
+
+  const sortedSupportsForModel = [...supports].sort((a, b) => a.x - b.x);
+  const nodesForModel = sortedSupportsForModel.map((s, idx) => ({
+    id: `N${idx}`,
+    x: s.x,
+    support_type: s.type,
+  }));
+  const elementsForModel = [];
+  let EForModel = 210e9;
+  let IForModel = 1.943e-5;
+  if (sectionId === 'IPE300') { IForModel = 8.356e-5; }
+  else if (sectionId === 'IPE400') { IForModel = 2.313e-4; }
+  else if (sectionId === 'HEB200') { IForModel = 5.696e-5; }
+  else if (sectionId === 'HEB300') { IForModel = 2.517e-4; }
+
+  for (let i = 0; i < nodesForModel.length - 1; i++) {
+    elementsForModel.push({
+      id: `E${i}`,
+      start_node_id: nodesForModel[i].id,
+      end_node_id: nodesForModel[i + 1].id,
+      e: EForModel,
+      i_inertia: IForModel,
+    });
+  }
+  const inputModel = {
+    nodes: nodesForModel,
+    elements: elementsForModel,
+    distributed_loads: elementsForModel.map(el => ({
+      element_id: el.id,
+      value: -loadValue,
+    })),
+    point_loads: pointLoads.map(pl => ({
+      x: pl.x,
+      value: pl.value,
+    })),
+    geometry: { length: beamLength }
+  };
+
+  const result = { results };
+
   return (
     <div className="app-layout">
       {/* ===== Top Bar ===== */}
@@ -597,14 +641,10 @@ export default function App() {
             </div>
           ) : (
             <Canvas2D 
-              results={results} 
-              supports={supports} 
-              pointLoads={pointLoads} 
-              beamLength={beamLength} 
-              load={loadValue} 
-              activeTool={activeTool}
-              setActiveTool={setActiveTool}
-              setBeamLength={setBeamLength}
+              model={inputModel} 
+              result={result} 
+              activeTool={activeTool} 
+              onSketchComplete={handleSketchComplete} 
             />
           )}
         </div>

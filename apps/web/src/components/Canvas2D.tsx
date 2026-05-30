@@ -24,14 +24,17 @@ export interface PointLoad {
 }
 
 interface Canvas2DProps {
-  results: ResultPoint[] | null;
-  supports: Support[];
-  pointLoads: PointLoad[];
-  beamLength: number;
-  load: number;
-  activeTool: 'select' | 'draw_beam' | 'add_point_load' | 'add_support';
-  setBeamLength: (length: number) => void;
-  setActiveTool: (tool: 'select' | 'draw_beam' | 'add_point_load' | 'add_support') => void;
+  results?: ResultPoint[] | null;
+  supports?: Support[];
+  pointLoads?: PointLoad[];
+  beamLength?: number;
+  load?: number;
+  activeTool?: string;
+  setBeamLength?: (length: number) => void;
+  setActiveTool?: (tool: 'select' | 'draw_beam' | 'add_point_load' | 'add_support') => void;
+  model?: any;
+  result?: any;
+  onSketchComplete?: (lengthInMeters: number) => void;
 }
 
 // =============================================================================
@@ -298,12 +301,30 @@ export default function Canvas2D({
   load,
   activeTool,
   setBeamLength,
-  setActiveTool
+  setActiveTool,
+  model,
+  result,
+  onSketchComplete
 }: Canvas2DProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentStroke, setCurrentStroke] = useState<{ x: number; y: number }[]>([]);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Dynamic fallback resolution to handle both detailed properties and model/result objects
+  const beamLengthToUse = beamLength ?? (model?.nodes ? Math.max(...model.nodes.map((n: any) => n.x)) : 5.0);
+  const supportsToUse: Support[] = supports ?? (model?.nodes ? model.nodes.map((n: any) => ({
+    id: n.id,
+    x: n.x,
+    type: (n.support_type === 'Pinned' || n.support_type === 'Fixed') ? (n.support_type as 'Pinned' | 'Fixed') : 'Pinned',
+  })) : []);
+  const pointLoadsToUse: PointLoad[] = pointLoads ?? (model?.point_loads ? model.point_loads.map((pl: any, idx: number) => ({
+    id: `PL_${idx}`,
+    x: pl.x,
+    value: pl.value,
+  })) : []);
+  const loadToUse = load ?? (model?.distributed_loads?.[0]?.value ? Math.abs(model.distributed_loads[0].value) : 10.0);
+  const resultsToUse: ResultPoint[] | null = results !== undefined ? results : (result?.results ? (result.results as ResultPoint[]) : null);
 
   // Auto-dismiss toast message after 2.5s
   useEffect(() => {
@@ -350,31 +371,30 @@ export default function Canvas2D({
     if (activeTool !== 'draw_beam' || !isDrawing) return;
     setIsDrawing(false);
 
-    if (currentStroke.length >= 2) {
+    if (currentStroke.length > 5) {
       const xs = currentStroke.map(p => p.x);
       const minX = Math.min(...xs);
       const maxX = Math.max(...xs);
       const pixelWidth = maxX - minX;
 
-      // Only trigger if line is drawn at least 40px wide to avoid accidental clicks
-      if (pixelWidth >= 40) {
-        const canvas = canvasRef.current;
-        if (canvas) {
-          const w = canvas.clientWidth;
-          const beamPixelLen = w - 160; // 80 left margin + 80 right margin
-          const pixelsPerMeter = beamPixelLen / beamLength;
-          let newLen = pixelWidth / pixelsPerMeter;
-          newLen = Math.round(newLen * 2.0) / 2.0; // round to nearest 0.5m
-          newLen = Math.max(1.0, Math.min(20.0, newLen)); // clamp between 1.0m and 20.0m
+      if (pixelWidth > 50) {
+        // Calculate scaleX using the formula in the prompt
+        const scaleX = (canvasRef.current?.width || 800) / (model?.geometry?.length || beamLengthToUse || 5) / 1.2;
+        const calculatedMeters = pixelWidth / scaleX;
+        const roundedMeters = Math.round(calculatedMeters * 2) / 2;
 
-          setBeamLength(newLen);
-          setToastMessage(`✏️ Wykryto odręczny szkic belki: L = ${newLen.toFixed(1)} m`);
+        if (onSketchComplete) {
+          onSketchComplete(roundedMeters);
+        } else if (setBeamLength && setActiveTool) {
+          setBeamLength(roundedMeters);
+          setActiveTool('select');
         }
+        
+        setToastMessage(`✏️ Wykryto odręczny szkic belki: L = ${roundedMeters.toFixed(1)} m`);
       }
     }
 
     setCurrentStroke([]);
-    setActiveTool('select');
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
@@ -418,6 +438,13 @@ export default function Canvas2D({
 
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
+
+    // Map resolved values to shadows used below
+    const results = resultsToUse;
+    const supports = supportsToUse;
+    const pointLoads = pointLoadsToUse;
+    const beamLength = beamLengthToUse;
+    const load = loadToUse;
 
     // Minor/major background grid
     drawGrid(ctx, w, h);
