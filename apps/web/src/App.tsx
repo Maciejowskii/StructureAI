@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import Canvas2D, { type ResultPoint } from './components/Canvas2D';
+import { generateSteelReport, generateConcreteReport } from './utils/latexGenerator';
 
 // =============================================================================
 // WASM Solver Integration
@@ -8,6 +9,7 @@ import Canvas2D, { type ResultPoint } from './components/Canvas2D';
 type SolveFn = (input: any) => any;
 let solveMeshFn: SolveFn | null = null;
 let optimizeSectionsFn: SolveFn | null = null;
+let designRcSectionFn: ((m_ed_k_nm: number, profile_val: any) => any) | null = null;
 
 async function initWasm(): Promise<boolean> {
   try {
@@ -15,6 +17,7 @@ async function initWasm(): Promise<boolean> {
     await wasmModule.default();
     solveMeshFn = wasmModule.solve_mesh;
     optimizeSectionsFn = wasmModule.optimize_sections;
+    designRcSectionFn = wasmModule.design_rc_section;
     return true;
   } catch (err) {
     console.warn('[StructurAI] WASM module not available, using mock solver:', err);
@@ -148,6 +151,15 @@ export default function App() {
     { id: 'S2', x: 5.0, type: 'Pinned' },
   ]);
   const [pointLoads, setPointLoads] = useState<PointLoad[]>([]);
+
+  // Reinforced Concrete Design States (Faza 3)
+  const [designType, setDesignType] = useState<'steel' | 'concrete'>('steel');
+  const [rcWidth, setRcWidth] = useState<number>(30); // cm
+  const [rcHeight, setRcHeight] = useState<number>(50); // cm
+  const [rcCover, setRcCover] = useState<number>(3.5); // cm
+  const [rcConcreteClass, setRcConcreteClass] = useState<'C20/25' | 'C25/30' | 'C30/37'>('C25/30');
+  const [rcSteelGrade, setRcSteelGrade] = useState<number>(500); // MPa
+  const [rcResult, setRcResult] = useState<any | null>(null);
 
   // Initialize WASM
   useEffect(() => {
@@ -310,36 +322,180 @@ export default function App() {
 
     if (output && output.success) {
       setResults(output.results);
+
+      // Faza 3: Obliczenie Wymiarowania Żelbetu
+      if (designType === 'concrete') {
+        const maxMoment = Math.max(...output.results.map((r: any) => Math.abs(r.moment)));
+        const fckVal = rcConcreteClass === 'C20/25' ? 20.0 : rcConcreteClass === 'C25/30' ? 25.0 : 30.0;
+        const profile = {
+          width: rcWidth / 100.0,
+          height: rcHeight / 100.0,
+          cover: rcCover / 100.0,
+          fck: fckVal,
+          fyk: rcSteelGrade,
+        };
+
+        if (designRcSectionFn) {
+          const res = designRcSectionFn(maxMoment, profile);
+          setRcResult(res);
+        } else {
+          // Mock / Fallback calculations
+          const b_m = rcWidth / 100.0;
+          const h_m = rcHeight / 100.0;
+          const cover_m = rcCover / 100.0;
+          const fcd = fckVal / 1.5;
+          const fyd = rcSteelGrade / 1.15;
+          const d_val = h_m - cover_m - 0.01;
+          
+          let is_over = false;
+          let mi_val = 0;
+          let as_req_val = 0;
+          let as_min_val = 0;
+
+          if (d_val > 0) {
+            const m_ed_mnm = maxMoment / 1000.0;
+            const denom = b_m * d_val * d_val * fcd;
+            mi_val = denom > 0 ? m_ed_mnm / denom : 999.0;
+            if (mi_val > 0.372) {
+              is_over = true;
+            } else {
+              const xi_val = 1.25 * (1.0 - Math.sqrt(1.0 - 2.0 * mi_val));
+              const z_val = d_val * (1.0 - 0.4 * xi_val);
+              as_req_val = (m_ed_mnm / (z_val * fyd)) * 10000.0;
+              
+              const fctm = 0.3 * Math.pow(fckVal, 2.0 / 3.0);
+              const term1 = 0.26 * (fctm / rcSteelGrade) * b_m * d_val;
+              const term2 = 0.0013 * b_m * d_val;
+              as_min_val = Math.max(term1, term2) * 10000.0;
+            }
+          } else {
+            is_over = true;
+          }
+
+          setRcResult({
+            d: d_val,
+            mi: mi_val,
+            as_req: as_req_val,
+            as_min: as_min_val,
+            is_overreinforced: is_over,
+          });
+        }
+      }
     } else {
       console.error('[StructurAI] Solver error:', output?.error);
     }
 
-    // Run AI section optimization in real-time
-    if (optimizeSectionsFn) {
-      const optOut = optimizeSectionsFn(inputModel);
-      if (optOut && optOut.success) {
-        setOptResults(optOut);
-        console.log('[StructurAI] AI section optimization complete');
+    // Run AI section optimization in real-time if steel mode is selected
+    if (designType === 'steel') {
+      if (optimizeSectionsFn) {
+        const optOut = optimizeSectionsFn(inputModel);
+        if (optOut && optOut.success) {
+          setOptResults(optOut);
+          console.log('[StructurAI] AI section optimization complete');
+        } else {
+          console.warn('[StructurAI] AI section optimizer returned error:', optOut?.error);
+          setOptResults(null);
+        }
       } else {
-        console.warn('[StructurAI] AI section optimizer returned error:', optOut?.error);
-        setOptResults(null);
+        // Mock optimizer output if WASM is not loaded
+        setOptResults({
+          success: true,
+          error: null,
+          cheapest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: 20.0, weight: 12.9, price_factor: 1.0 },
+          lightest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: 20.0, weight: 12.9, price_factor: 1.0 },
+          balanced: { name: 'IPE 200', utilization_sgn: 0.44, deflection_sgu: 5.1, limit_sgu: 20.0, weight: 22.4, price_factor: 1.0 }
+        });
       }
-    } else {
-      // Mock optimizer output if WASM is not loaded
-      setOptResults({
-        success: true,
-        error: null,
-        cheapest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: 20.0, weight: 12.9, price_factor: 1.0 },
-        lightest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: 20.0, weight: 12.9, price_factor: 1.0 },
-        balanced: { name: 'IPE 200', utilization_sgn: 0.44, deflection_sgu: 5.1, limit_sgu: 20.0, weight: 22.4, price_factor: 1.0 }
-      });
     }
-  }, [beamLength, loadValue, sectionId, supports, pointLoads]);
+  }, [
+    beamLength,
+    loadValue,
+    sectionId,
+    supports,
+    pointLoads,
+    designType,
+    rcWidth,
+    rcHeight,
+    rcCover,
+    rcConcreteClass,
+    rcSteelGrade,
+  ]);
 
   // Auto-solve on parameter change (real-time!)
   useEffect(() => {
     if (wasmReady) solve();
   }, [wasmReady, solve]);
+
+  const handleDownloadReport = () => {
+    if (!results) return;
+    const maxMoment = Math.max(...results.map(r => Math.abs(r.moment)));
+    let latexContent = '';
+    let filename = 'raport_projektowy.tex';
+
+    if (designType === 'concrete') {
+      if (!rcResult) return;
+      const fckVal = rcConcreteClass === 'C20/25' ? 20.0 : rcConcreteClass === 'C25/30' ? 25.0 : 30.0;
+      latexContent = generateConcreteReport(
+        maxMoment,
+        rcWidth,
+        rcHeight,
+        rcCover,
+        fckVal,
+        rcSteelGrade,
+        rcResult.d,
+        rcResult.mi,
+        rcResult.as_req,
+        rcResult.as_min,
+        rcResult.is_overreinforced
+      );
+      filename = `raport_zelbet_${rcWidth}x${rcHeight}_${rcConcreteClass}.tex`;
+    } else {
+      // Steel
+      let wy = 194.0; // standard IPE 200
+      if (sectionId === 'IPE300') wy = 557.0;
+      else if (sectionId === 'IPE400') wy = 1160.0;
+      else if (sectionId === 'HEB200') wy = 570.0;
+      else if (sectionId === 'HEB300') wy = 1680.0;
+
+      let utilization = 0.5;
+      let deflection = 5.0;
+      let limit_sgu = 20.0;
+
+      if (optResults && optResults.success) {
+        const activeName = sectionId.replace('HEB', 'HEB ').replace('IPE', 'IPE ');
+        let activeOpt = optResults.cheapest;
+        if (optResults.lightest?.name === activeName) activeOpt = optResults.lightest;
+        if (optResults.balanced?.name === activeName) activeOpt = optResults.balanced;
+        
+        if (activeOpt) {
+          utilization = activeOpt.utilization_sgn;
+          deflection = activeOpt.deflection_sgu;
+          limit_sgu = activeOpt.limit_sgu;
+        }
+      }
+
+      latexContent = generateSteelReport(
+        maxMoment,
+        sectionId.replace('HEB', 'HEB ').replace('IPE', 'IPE '),
+        wy,
+        235, // S235
+        utilization,
+        deflection,
+        limit_sgu
+      );
+      filename = `raport_stal_${sectionId}.tex`;
+    }
+
+    const blob = new Blob([latexContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="app-layout">
@@ -420,6 +576,46 @@ export default function App() {
         <aside className="properties-panel">
           <div className="properties-panel__header">
             <span className="properties-panel__title">Parametry</span>
+          </div>
+
+          {/* Material / Design Toggle (Faza 3) */}
+          <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+            <button
+              onClick={() => setDesignType('steel')}
+              style={{
+                flex: 1,
+                padding: '12px',
+                background: designType === 'steel' ? 'rgba(59, 130, 246, 0.15)' : 'transparent',
+                border: 'none',
+                borderBottom: designType === 'steel' ? '2px solid #3b82f6' : '2px solid transparent',
+                color: designType === 'steel' ? '#3b82f6' : '#94a3b8',
+                fontWeight: 'bold',
+                fontSize: '13px',
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+              id="toggle-design-steel"
+            >
+              🏗 Stal (Optymalizacja)
+            </button>
+            <button
+              onClick={() => setDesignType('concrete')}
+              style={{
+                flex: 1,
+                padding: '12px',
+                background: designType === 'concrete' ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
+                border: 'none',
+                borderBottom: designType === 'concrete' ? '2px solid #10b981' : '2px solid transparent',
+                color: designType === 'concrete' ? '#10b981' : '#94a3b8',
+                fontWeight: 'bold',
+                fontSize: '13px',
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+              id="toggle-design-concrete"
+            >
+              🧱 Żelbet (EC2)
+            </button>
           </div>
 
           {/* Beam Length */}
@@ -618,123 +814,302 @@ export default function App() {
             </div>
           </div>
 
-          {/* Section */}
-          <div className="properties-panel__section">
-            <div className="properties-panel__section-title">Przekrój</div>
-            <label className="param-label" htmlFor="param-section">
-              Profil stalowy
-            </label>
-            <select
-              id="param-section"
-              value={sectionId}
-              onChange={(e) => setSectionId(e.target.value)}
-              className="param-select"
-            >
-              <option value="IPE200">IPE 200</option>
-              <option value="IPE300">IPE 300</option>
-              <option value="IPE400">IPE 400</option>
-              <option value="HEB200">HEB 200</option>
-              <option value="HEB300">HEB 300</option>
-            </select>
-          </div>
-
-          {/* AI Section Recommendation */}
-          {optResults && optResults.success && (
-            <div className="properties-panel__section">
-              <div className="properties-panel__section-title">Optymalizacja Przekroju AI</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
-                
-                {/* Cheapest (Najtańszy) */}
-                {optResults.cheapest && (
-                  <div 
-                    onClick={() => setSectionId(optResults.cheapest!.name.replace(' ', ''))}
-                    style={{ 
-                      background: sectionId === optResults.cheapest.name.replace(' ', '') ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255,255,255,0.02)', 
-                      border: sectionId === optResults.cheapest.name.replace(' ', '') ? '1px solid #10b981' : '1px solid rgba(255,255,255,0.06)',
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease'
-                    }}
-                    className="opt-card"
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#10b981' }}>🟢 Najtańszy profil</span>
-                      <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.cheapest.weight.toFixed(1)} kg/m</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
-                      <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.cheapest.name}</span>
-                      <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.cheapest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
-                        Wytężenie: {(optResults.cheapest.utilization_sgn * 100).toFixed(0)}%
-                      </span>
-                    </div>
-                    <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
-                      Ugięcie: {optResults.cheapest.deflection_sgu.toFixed(1)} mm / {optResults.cheapest.limit_sgu.toFixed(1)} mm
-                    </div>
-                  </div>
-                )}
-
-                {/* Lightest (Najlżejszy) */}
-                {optResults.lightest && (
-                  <div 
-                    onClick={() => setSectionId(optResults.lightest!.name.replace(' ', ''))}
-                    style={{ 
-                      background: sectionId === optResults.lightest.name.replace(' ', '') ? 'rgba(6, 182, 212, 0.12)' : 'rgba(255,255,255,0.02)', 
-                      border: sectionId === optResults.lightest.name.replace(' ', '') ? '1px solid #06b6d4' : '1px solid rgba(255,255,255,0.06)',
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease'
-                    }}
-                    className="opt-card"
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#06b6d4' }}>⚡ Najlżejszy profil (Eco)</span>
-                      <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.lightest.weight.toFixed(1)} kg/m</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
-                      <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.lightest.name}</span>
-                      <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.lightest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
-                        Wytężenie: {(optResults.lightest.utilization_sgn * 100).toFixed(0)}%
-                      </span>
-                    </div>
-                    <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
-                      Ugięcie: {optResults.lightest.deflection_sgu.toFixed(1)} mm / {optResults.lightest.limit_sgu.toFixed(1)} mm
-                    </div>
-                  </div>
-                )}
-
-                {/* Balanced (Zrównoważony) */}
-                {optResults.balanced && (
-                  <div 
-                    onClick={() => setSectionId(optResults.balanced!.name.replace(' ', ''))}
-                    style={{ 
-                      background: sectionId === optResults.balanced.name.replace(' ', '') ? 'rgba(139, 92, 246, 0.12)' : 'rgba(255,255,255,0.02)', 
-                      border: sectionId === optResults.balanced.name.replace(' ', '') ? '1px solid #8b5cf6' : '1px solid rgba(255,255,255,0.06)',
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease'
-                    }}
-                    className="opt-card"
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b5cf6' }}>⚖ Zrównoważony profil (60-70%)</span>
-                      <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.balanced.weight.toFixed(1)} kg/m</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
-                      <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.balanced.name}</span>
-                      <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#8b5cf6' }}>
-                        Wytężenie: {(optResults.balanced.utilization_sgn * 100).toFixed(0)}%
-                      </span>
-                    </div>
-                    <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
-                      Ugięcie: {optResults.balanced.deflection_sgu.toFixed(1)} mm / {optResults.balanced.limit_sgu.toFixed(1)} mm
-                    </div>
-                  </div>
-                )}
+          {/* Faza 3: Przekrój Stalowy lub Przekrój Żelbetowy */}
+          {designType === 'steel' ? (
+            <>
+              {/* Section */}
+              <div className="properties-panel__section">
+                <div className="properties-panel__section-title">Przekrój</div>
+                <label className="param-label" htmlFor="param-section">
+                  Profil stalowy
+                </label>
+                <select
+                  id="param-section"
+                  value={sectionId}
+                  onChange={(e) => setSectionId(e.target.value)}
+                  className="param-select"
+                >
+                  <option value="IPE200">IPE 200</option>
+                  <option value="IPE300">IPE 300</option>
+                  <option value="IPE400">IPE 400</option>
+                  <option value="HEB200">HEB 200</option>
+                  <option value="HEB300">HEB 300</option>
+                </select>
               </div>
-            </div>
+
+              {/* AI Section Recommendation */}
+              {optResults && optResults.success && (
+                <div className="properties-panel__section">
+                  <div className="properties-panel__section-title">Optymalizacja Przekroju AI</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+                    
+                    {/* Cheapest (Najtańszy) */}
+                    {optResults.cheapest && (
+                      <div 
+                        onClick={() => setSectionId(optResults.cheapest!.name.replace(' ', ''))}
+                        style={{ 
+                          background: sectionId === optResults.cheapest.name.replace(' ', '') ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255,255,255,0.02)', 
+                          border: sectionId === optResults.cheapest.name.replace(' ', '') ? '1px solid #10b981' : '1px solid rgba(255,255,255,0.06)',
+                          padding: '10px 12px',
+                          borderRadius: '8px',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease'
+                        }}
+                        className="opt-card"
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#10b981' }}>🟢 Najtańszy profil</span>
+                          <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.cheapest.weight.toFixed(1)} kg/m</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.cheapest.name}</span>
+                          <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.cheapest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
+                            Wytężenie: {(optResults.cheapest.utilization_sgn * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                          Ugięcie: {optResults.cheapest.deflection_sgu.toFixed(1)} mm / {optResults.cheapest.limit_sgu.toFixed(1)} mm
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Lightest (Najlżejszy) */}
+                    {optResults.lightest && (
+                      <div 
+                        onClick={() => setSectionId(optResults.lightest!.name.replace(' ', ''))}
+                        style={{ 
+                          background: sectionId === optResults.lightest.name.replace(' ', '') ? 'rgba(6, 182, 212, 0.12)' : 'rgba(255,255,255,0.02)', 
+                          border: sectionId === optResults.lightest.name.replace(' ', '') ? '1px solid #06b6d4' : '1px solid rgba(255,255,255,0.06)',
+                          padding: '10px 12px',
+                          borderRadius: '8px',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease'
+                        }}
+                        className="opt-card"
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#06b6d4' }}>⚡ Najlżejszy profil (Eco)</span>
+                          <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.lightest.weight.toFixed(1)} kg/m</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.lightest.name}</span>
+                          <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.lightest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
+                            Wytężenie: {(optResults.lightest.utilization_sgn * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                          Ugięcie: {optResults.lightest.deflection_sgu.toFixed(1)} mm / {optResults.lightest.limit_sgu.toFixed(1)} mm
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Balanced (Zrównoważony) */}
+                    {optResults.balanced && (
+                      <div 
+                        onClick={() => setSectionId(optResults.balanced!.name.replace(' ', ''))}
+                        style={{ 
+                          background: sectionId === optResults.balanced.name.replace(' ', '') ? 'rgba(139, 92, 246, 0.12)' : 'rgba(255,255,255,0.02)', 
+                          border: sectionId === optResults.balanced.name.replace(' ', '') ? '1px solid #8b5cf6' : '1px solid rgba(255,255,255,0.06)',
+                          padding: '10px 12px',
+                          borderRadius: '8px',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease'
+                        }}
+                        className="opt-card"
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b5cf6' }}>⚖ Zrównoważony profil (60-70%)</span>
+                          <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.balanced.weight.toFixed(1)} kg/m</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.balanced.name}</span>
+                          <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#8b5cf6' }}>
+                            Wytężenie: {(optResults.balanced.utilization_sgn * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                          Ugięcie: {optResults.balanced.deflection_sgu.toFixed(1)} mm / {optResults.balanced.limit_sgu.toFixed(1)} mm
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              {/* Concrete Geometry */}
+              <div className="properties-panel__section">
+                <div className="properties-panel__section-title">Parametry Żelbetu (EC2)</div>
+                
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '10px' }}>
+                  
+                  {/* Width b */}
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                      <label className="param-label" style={{ margin: 0 }}>Szerokość belki b [cm]</label>
+                      <span className="mono-value" style={{ color: '#10b981', fontWeight: 'bold' }}>{rcWidth} cm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="15"
+                      max="80"
+                      step="5"
+                      value={rcWidth}
+                      onChange={(e) => setRcWidth(parseInt(e.target.value))}
+                      style={{ width: '100%', accentColor: '#10b981', height: '4px' }}
+                      id="rc-param-width"
+                    />
+                  </div>
+
+                  {/* Height h */}
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                      <label className="param-label" style={{ margin: 0 }}>Wysokość belki h [cm]</label>
+                      <span className="mono-value" style={{ color: '#10b981', fontWeight: 'bold' }}>{rcHeight} cm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="20"
+                      max="120"
+                      step="5"
+                      value={rcHeight}
+                      onChange={(e) => setRcHeight(parseInt(e.target.value))}
+                      style={{ width: '100%', accentColor: '#10b981', height: '4px' }}
+                      id="rc-param-height"
+                    />
+                  </div>
+
+                  {/* Cover cover */}
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                      <label className="param-label" style={{ margin: 0 }}>Otulina c_nom [cm]</label>
+                      <span className="mono-value" style={{ color: '#10b981', fontWeight: 'bold' }}>{rcCover.toFixed(1)} cm</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="2"
+                      max="6"
+                      step="0.5"
+                      value={rcCover}
+                      onChange={(e) => setRcCover(parseFloat(e.target.value))}
+                      style={{ width: '100%', accentColor: '#10b981', height: '4px' }}
+                      id="rc-param-cover"
+                    />
+                  </div>
+
+                  {/* Concrete Class */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <label className="param-label" style={{ margin: 0 }}>Klasa betonu</label>
+                    <select
+                      value={rcConcreteClass}
+                      onChange={(e) => setRcConcreteClass(e.target.value as any)}
+                      className="param-select"
+                      id="rc-param-class"
+                    >
+                      <option value="C20/25">C20/25 (fck = 20 MPa)</option>
+                      <option value="C25/30">C25/30 (fck = 25 MPa)</option>
+                      <option value="C30/37">C30/37 (fck = 30 MPa)</option>
+                    </select>
+                  </div>
+
+                  {/* Steel Grade */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <label className="param-label" style={{ margin: 0 }}>Klasa stali zbrojeniowej</label>
+                    <select
+                      value={rcSteelGrade}
+                      onChange={(e) => setRcSteelGrade(parseInt(e.target.value))}
+                      className="param-select"
+                      id="rc-param-steel"
+                    >
+                      <option value="500">S500 (fyk = 500 MPa)</option>
+                      <option value="400">S400 (fyk = 400 MPa)</option>
+                    </select>
+                  </div>
+
+                </div>
+              </div>
+
+              {/* Concrete Design Results Card */}
+              {rcResult && (
+                <div className="properties-panel__section">
+                  <div className="properties-panel__section-title">Wymiarowanie Żelbetu</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+                    
+                    {rcResult.is_overreinforced ? (
+                      <div style={{ 
+                        background: 'rgba(239, 68, 68, 0.15)', 
+                        border: '1px solid #ef4444', 
+                        padding: '12px', 
+                        borderRadius: '8px',
+                        color: '#fca5a5',
+                        fontSize: '12px',
+                        lineHeight: '1.4'
+                      }} id="rc-result-overreinforced">
+                        <div style={{ fontWeight: 'bold', fontSize: '13px', marginBottom: '4px' }}>🔴 PRZEBROJENIE PRZEKROJU!</div>
+                        Współczynnik mi = {rcResult.mi.toFixed(3)} przekracza wartość graniczną mi_lim = 0.372. 
+                        Należy zwiększyć wysokość/szerokość belki lub podwyższyć klasę betonu.
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ 
+                          background: 'rgba(16, 185, 129, 0.05)', 
+                          border: '1px solid rgba(16, 185, 129, 0.2)', 
+                          padding: '10px 12px', 
+                          borderRadius: '8px',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center'
+                        }}>
+                          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Wysokość użyteczna d:</span>
+                          <span className="mono-value" style={{ fontSize: '12px', fontWeight: 'bold', color: '#e2e8f0' }}>{(rcResult.d * 100).toFixed(1)} cm</span>
+                        </div>
+
+                        <div style={{ 
+                          background: 'rgba(16, 185, 129, 0.05)', 
+                          border: '1px solid rgba(16, 185, 129, 0.2)', 
+                          padding: '10px 12px', 
+                          borderRadius: '8px',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center'
+                        }}>
+                          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Moment względny mi:</span>
+                          <span className="mono-value" style={{ fontSize: '12px', fontWeight: 'bold', color: '#e2e8f0' }}>{rcResult.mi.toFixed(3)}</span>
+                        </div>
+
+                        <div style={{ 
+                          background: 'rgba(16, 185, 129, 0.1)', 
+                          border: '1px solid #10b981', 
+                          padding: '12px', 
+                          borderRadius: '8px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '6px'
+                        }} id="rc-result-success">
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '11px', color: '#a7f3d0', fontWeight: '500' }}>Wymagane zbrojenie As,req:</span>
+                            <span className="mono-value" style={{ fontSize: '14px', fontWeight: 'bold', color: '#10b981' }}>{rcResult.as_req.toFixed(2)} cm²</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '11px', color: '#a7f3d0', fontWeight: '500' }}>Minimalne zbrojenie As,min:</span>
+                            <span className="mono-value" style={{ fontSize: '14px', fontWeight: 'bold', color: '#10b981' }}>{rcResult.as_min.toFixed(2)} cm²</span>
+                          </div>
+                          <div style={{ height: '1px', background: 'rgba(16, 185, 129, 0.2)', margin: '4px 0' }} />
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '12px', color: '#fff', fontWeight: 'bold' }}>Dobierz przekrój As:</span>
+                            <span className="mono-value" style={{ fontSize: '15px', fontWeight: 'bold', color: '#10b981' }}>
+                              {Math.max(rcResult.as_req, rcResult.as_min).toFixed(2)} cm²
+                            </span>
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           {/* Results */}
@@ -773,6 +1148,37 @@ export default function App() {
               </div>
             );
           })()}
+
+          {/* Raport Generator */}
+          {results && (
+            <div className="properties-panel__section" style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '15px' }}>
+              <button 
+                className="btn btn--primary" 
+                onClick={handleDownloadReport}
+                style={{ 
+                  width: '100%', 
+                  background: designType === 'steel' 
+                    ? 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)'
+                    : 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                  boxShadow: designType === 'steel'
+                    ? '0 4px 12px rgba(59, 130, 246, 0.3)'
+                    : '0 4px 12px rgba(16, 185, 129, 0.3)',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontWeight: 'bold',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  gap: '8px',
+                  height: '42px',
+                  fontSize: '13px'
+                }}
+                id="btn-generate-report"
+              >
+                📄 Generuj Raport White-Box (.tex)
+              </button>
+            </div>
+          )}
         </aside>
       </div>
 
@@ -784,7 +1190,7 @@ export default function App() {
             <span>Solver MES gotowy</span>
           </div>
           <span className="mono-value" style={{ fontSize: '11px' }}>
-            Przęsła: {supports.length - 1} | {sectionId} | S235
+            Przęsła: {supports.length - 1} | {designType === 'steel' ? `${sectionId} | S235` : `${rcWidth}x${rcHeight}cm | ${rcConcreteClass}`}
           </span>
         </div>
         <div className="status-bar__right">

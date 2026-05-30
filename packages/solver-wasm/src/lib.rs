@@ -90,6 +90,24 @@ pub struct OptimizerOutput {
     pub balanced: Option<OptimizationResult>,
 }
 
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ConcreteProfile {
+    pub width: f64,          // b [m]
+    pub height: f64,         // h [m]
+    pub cover: f64,          // cover [m]
+    pub fck: f64,            // fck [MPa]
+    pub fyk: f64,            // fyk [MPa]
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RcDesignResult {
+    pub d: f64,                        // effective height [m]
+    pub mi: f64,                       // relative bending moment [-]
+    pub as_req: f64,                   // required tensile reinforcement area [cm2]
+    pub as_min: f64,                   // minimum reinforcement area [cm2]
+    pub is_overreinforced: bool,       // true if mi > 0.372
+}
+
 // =============================================================================
 // Static Steel Profile Database
 // =============================================================================
@@ -162,6 +180,93 @@ pub fn optimize_sections(input_val: JsValue) -> JsValue {
     };
 
     let result = optimize_sections_internal(&input_model);
+    serde_wasm_bindgen::to_value(&result).unwrap_or_default()
+}
+
+pub fn design_rc_section_internal(m_ed_k_nm: f64, profile: &ConcreteProfile) -> RcDesignResult {
+    let b = profile.width;
+    let h = profile.height;
+    let cover = profile.cover;
+    let fck = profile.fck;
+    let fyk = profile.fyk;
+
+    if b <= 0.0 || h <= 0.0 || cover < 0.0 || fck <= 0.0 || fyk <= 0.0 {
+        return RcDesignResult {
+            d: 0.0,
+            mi: 0.0,
+            as_req: 0.0,
+            as_min: 0.0,
+            is_overreinforced: true,
+        };
+    }
+
+    let fcd = fck / 1.5;
+    let fyd = fyk / 1.15;
+    let d = h - cover - 0.01; // effective height [m]
+
+    if d <= 0.0 {
+        return RcDesignResult {
+            d: 0.0,
+            mi: 0.0,
+            as_req: 0.0,
+            as_min: 0.0,
+            is_overreinforced: true,
+        };
+    }
+
+    let m_ed_mnm = m_ed_k_nm.abs() / 1000.0;
+    let denom = b * d * d * fcd;
+    let mi = if denom > 0.0 { m_ed_mnm / denom } else { 999.0 };
+
+    if mi > 0.372 {
+        return RcDesignResult {
+            d,
+            mi,
+            as_req: 0.0,
+            as_min: 0.0,
+            is_overreinforced: true,
+        };
+    }
+
+    let xi = 1.25 * (1.0 - (1.0 - 2.0 * mi).max(0.0).sqrt());
+    let z = d * (1.0 - 0.4 * xi);
+
+    let as_req = if z > 0.0 && fyd > 0.0 {
+        (m_ed_mnm / (z * fyd)) * 10000.0
+    } else {
+        0.0
+    };
+
+    let fctm = 0.3 * fck.powf(2.0 / 3.0);
+    let term1 = 0.26 * (fctm / fyk) * b * d;
+    let term2 = 0.0013 * b * d;
+    let as_min = term1.max(term2) * 10000.0;
+
+    RcDesignResult {
+        d,
+        mi,
+        as_req,
+        as_min,
+        is_overreinforced: false,
+    }
+}
+
+#[wasm_bindgen]
+pub fn design_rc_section(m_ed_k_nm: f64, profile_val: JsValue) -> JsValue {
+    let profile: ConcreteProfile = match serde_wasm_bindgen::from_value(profile_val) {
+        Ok(p) => p,
+        Err(_e) => {
+            return serde_wasm_bindgen::to_value(&RcDesignResult {
+                d: 0.0,
+                mi: 0.0,
+                as_req: 0.0,
+                as_min: 0.0,
+                is_overreinforced: true,
+            }).unwrap();
+        }
+    };
+
+    let result = design_rc_section_internal(m_ed_k_nm, &profile);
     serde_wasm_bindgen::to_value(&result).unwrap_or_default()
 }
 
@@ -681,5 +786,27 @@ mod tests {
         let cheap = opt_output.cheapest.unwrap();
         println!("Cheapest section: {}", cheap.name);
         assert!(cheap.utilization_sgn <= 1.0);
+    }
+
+    #[test]
+    fn test_concrete_section_design_ec2() {
+        // C25/30: fck = 25.0 MPa, fyk = 500.0 MPa
+        // b = 30 cm = 0.30 m, h = 50 cm = 0.50 m, cover = 3.5 cm = 0.035 m
+        // Med = 150.0 kNm
+        let profile = ConcreteProfile {
+            width: 0.30,
+            height: 0.50,
+            cover: 0.035,
+            fck: 25.0,
+            fyk: 500.0,
+        };
+        
+        let result = design_rc_section_internal(150.0, &profile);
+        
+        assert!(!result.is_overreinforced);
+        assert!((result.d - 0.455).abs() < 1e-4);
+        assert!((result.as_req - 8.23).abs() < 0.1, "Required area was: {}", result.as_req);
+        // Minimum reinforcement: ~1.82 cm2
+        assert!((result.as_min - 1.82).abs() < 0.1, "Minimum area was: {}", result.as_min);
     }
 }
