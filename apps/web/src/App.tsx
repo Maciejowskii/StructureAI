@@ -133,7 +133,7 @@ interface Support {
   type: 'Pinned' | 'Fixed';
 }
 
-export type ToolMode = 'select' | 'draw_beam' | 'add_point_load' | 'add_support';
+export type ToolMode = 'select' | 'draw_beam' | 'add_point_load' | 'add_support_pinned' | 'add_support_fixed';
 
 // =============================================================================
 // App Component
@@ -198,20 +198,11 @@ export default function App() {
     });
   }, [beamLength]);
 
-  const addSupport = () => {
+  const addSupport = (x: number = beamLength / 2, type: 'Pinned' | 'Fixed' = 'Pinned') => {
     if (supports.length >= 10) return;
-    const newX = parseFloat((beamLength / 2).toFixed(1));
+    const clampedX = Math.min(Math.max(x, 0), beamLength);
     setSupports(prev => {
-      const next = [...prev];
-      const end = next.pop()!;
-      next.push({
-        id: `S_int_${Date.now()}`,
-        x: newX,
-        type: 'Pinned'
-      });
-      next.sort((a, b) => a.x - b.x);
-      next.push(end);
-      return next;
+      return [...prev, { id: 'S_' + Date.now(), x: parseFloat(clampedX.toFixed(1)), type }].sort((a, b) => a.x - b.x);
     });
   };
 
@@ -239,15 +230,15 @@ export default function App() {
     });
   };
 
-  const addPointLoad = () => {
+  const addPointLoad = (x: number = beamLength / 2, value: number = -50) => {
     if (pointLoads.length >= 5) return;
-    const newX = parseFloat((beamLength / 2).toFixed(1));
+    const clampedX = Math.min(Math.max(x, 0.1), beamLength - 0.1);
     setPointLoads(prev => [
       ...prev,
       {
         id: `PL_${Date.now()}`,
-        x: newX,
-        value: -20.0, // default -20 kN (downwards)
+        x: parseFloat(clampedX.toFixed(1)),
+        value,
       }
     ]);
   };
@@ -515,6 +506,21 @@ export default function App() {
     setActiveTool('select');
   };
 
+  const handleCanvasClick = (xMeters: number) => {
+    // Zaokrąglamy kliknięcie do 0.1m dla równego wymiarowania
+    const roundedX = Math.round(xMeters * 10) / 10;
+    if (activeTool === 'add_support_pinned') {
+      addSupport(roundedX, 'Pinned');
+      setActiveTool('select');
+    } else if (activeTool === 'add_support_fixed') {
+      addSupport(roundedX, 'Fixed');
+      setActiveTool('select');
+    } else if (activeTool === 'add_point_load') {
+      addPointLoad(roundedX, -50);
+      setActiveTool('select');
+    }
+  };
+
   const sortedSupportsForModel = [...supports].sort((a, b) => a.x - b.x);
   const nodesForModel = sortedSupportsForModel.map((s, idx) => ({
     id: `N${idx}`,
@@ -587,7 +593,12 @@ export default function App() {
           >
             ◇
           </button>
-          <button className="toolbar__btn" data-tooltip="Dodaj węzeł" id="tool-node" disabled>
+          <button 
+            className="toolbar__btn" 
+            data-tooltip="Dodaj węzeł" 
+            id="tool-node"
+            disabled
+          >
             ⊕
           </button>
           <button 
@@ -600,17 +611,17 @@ export default function App() {
           </button>
           <div className="toolbar__separator" />
           <button 
-            className={`toolbar__btn ${activeTool === 'add_support' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip="Dodaj podporę stałą" 
-            onClick={() => setActiveTool('add_support')}
+            className={`toolbar__btn ${activeTool === 'add_support_pinned' ? 'toolbar__btn--active' : ''}`} 
+            data-tooltip="Dodaj podporę stałą (przegubową)" 
+            onClick={() => setActiveTool('add_support_pinned')}
             id="tool-pinned"
           >
             △
           </button>
           <button 
-            className={`toolbar__btn ${activeTool === 'add_support' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip="Dodaj podporę przesuwną" 
-            onClick={() => setActiveTool('add_support')}
+            className={`toolbar__btn ${activeTool === 'add_support_fixed' ? 'toolbar__btn--active' : ''}`} 
+            data-tooltip="Dodaj utwierdzenie" 
+            onClick={() => setActiveTool('add_support_fixed')}
             id="tool-roller"
           >
             ○
@@ -655,6 +666,7 @@ export default function App() {
               result={result} 
               activeTool={activeTool} 
               onSketchComplete={handleSketchComplete} 
+              onCanvasClick={handleCanvasClick}
             />
           )}
         </div>
@@ -732,7 +744,7 @@ export default function App() {
               <span>Podpory belki</span>
               <button 
                 className="btn btn--primary" 
-                onClick={addSupport} 
+                onClick={() => addSupport()} 
                 style={{ padding: '2px 8px', fontSize: '11px', height: 'auto', borderRadius: '4px' }}
                 disabled={supports.length >= 8}
               >
@@ -758,12 +770,13 @@ export default function App() {
                       <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#94a3b8' }}>
                         Węzeł N{idx + 1} ({isStart ? 'Start' : isEnd ? 'Koniec' : `x = ${s.x.toFixed(1)}m`})
                       </span>
-                      {!isEdge && (
+                      {supports.length > 2 && (
                         <button 
                           onClick={() => removeSupport(s.id)}
-                          style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '11px', cursor: 'pointer', padding: 0 }}
+                          style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '12px', cursor: 'pointer', padding: 0, fontWeight: 'bold' }}
+                          title="Usuń węzeł"
                         >
-                          Usuń
+                          ✕
                         </button>
                       )}
                     </div>
@@ -781,24 +794,36 @@ export default function App() {
                         />
                       )}
                       
-                      <select
-                        value={s.type}
-                        onChange={(e) => updateSupportType(s.id, e.target.value as 'Pinned' | 'Fixed')}
-                        className="param-select"
-                        style={{ 
-                          padding: '2px 6px', 
-                          fontSize: '11px', 
-                          height: '24px', 
-                          width: '100px', 
-                          background: 'rgba(0,0,0,0.3)',
-                          border: '1px solid rgba(255,255,255,0.1)',
-                          borderRadius: '4px',
-                          color: '#e2e8f0'
-                        }}
-                      >
-                        <option value="Pinned">Przegub</option>
-                        <option value="Fixed">Utwierdzenie</option>
-                      </select>
+                      <div style={{ display: 'flex', gap: '4px', flex: isEdge ? 1 : 'unset', justifyContent: isEdge ? 'flex-end' : 'flex-start' }}>
+                        <button
+                          onClick={() => updateSupportType(s.id, 'Pinned')}
+                          style={{
+                            padding: '2px 8px',
+                            fontSize: '11px',
+                            borderRadius: '4px',
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            background: s.type === 'Pinned' ? '#2563eb' : 'rgba(0,0,0,0.3)',
+                            color: '#fff',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          Przegub
+                        </button>
+                        <button
+                          onClick={() => updateSupportType(s.id, 'Fixed')}
+                          style={{
+                            padding: '2px 8px',
+                            fontSize: '11px',
+                            borderRadius: '4px',
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            background: s.type === 'Fixed' ? '#2563eb' : 'rgba(0,0,0,0.3)',
+                            color: '#fff',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          Utwierdzenie
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -812,7 +837,7 @@ export default function App() {
               <span>Siły skupione</span>
               <button 
                 className="btn btn--primary" 
-                onClick={addPointLoad} 
+                onClick={() => addPointLoad()} 
                 style={{ padding: '2px 8px', fontSize: '11px', height: 'auto', borderRadius: '4px' }}
                 disabled={pointLoads.length >= 5}
               >
@@ -836,9 +861,10 @@ export default function App() {
                     </span>
                     <button 
                       onClick={() => removePointLoad(pl.id)}
-                      style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '11px', cursor: 'pointer', padding: 0 }}
+                      style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '12px', cursor: 'pointer', padding: 0, fontWeight: 'bold' }}
+                      title="Usuń siłę"
                     >
-                      Usuń
+                      ✕
                     </button>
                   </div>
 

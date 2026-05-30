@@ -35,6 +35,7 @@ interface Canvas2DProps {
   model?: any;
   result?: any;
   onSketchComplete?: (lengthInMeters: number) => void;
+  onCanvasClick?: (xMeters: number) => void;
 }
 
 // =============================================================================
@@ -304,7 +305,8 @@ export default function Canvas2D({
   setActiveTool,
   model,
   result,
-  onSketchComplete
+  onSketchComplete,
+  onCanvasClick
 }: Canvas2DProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -347,6 +349,21 @@ export default function Canvas2D({
 
 
 
+  const processCanvasClick = (clickX: number) => {
+    if (!onCanvasClick) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const w = canvas.clientWidth;
+    const currentLength = model?.geometry?.length || beamLengthToUse || 5.0;
+    const scaleX = (w - 100) / currentLength;
+    const startX = 50;
+    
+    const xMeters = (clickX - startX) / scaleX;
+    if (xMeters >= 0 && xMeters <= currentLength) {
+      onCanvasClick(xMeters);
+    }
+  };
+
   // Shared sketch-finish logic (mouse and touch)
   const finishSketch = (stroke: { x: number; y: number }[]) => {
     if (stroke.length > 5) {
@@ -386,10 +403,14 @@ export default function Canvas2D({
     setCurrentStroke(prev => [...prev, coords]);
   };
 
-  const handleMouseUp = () => {
-    if (activeTool !== 'draw_beam' || !isDrawing) return;
-    setIsDrawing(false);
-    finishSketch(currentStroke);
+  const handleMouseUp = (e?: React.MouseEvent<HTMLCanvasElement>) => {
+    if (activeTool === 'draw_beam' && isDrawing) {
+      setIsDrawing(false);
+      finishSketch(currentStroke);
+    } else if (e && (activeTool?.startsWith('add_support') || activeTool === 'add_point_load')) {
+      const coords = getCanvasCoords(e);
+      processCanvasClick(coords.x);
+    }
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
@@ -418,10 +439,21 @@ export default function Canvas2D({
   };
 
   const handleTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    if (activeTool !== 'draw_beam' || !isDrawing) return;
-    e.preventDefault();
-    setIsDrawing(false);
-    finishSketch(currentStroke);
+    if (activeTool === 'draw_beam' && isDrawing) {
+      e.preventDefault();
+      setIsDrawing(false);
+      finishSketch(currentStroke);
+    } else if (activeTool?.startsWith('add_support') || activeTool === 'add_point_load') {
+      e.preventDefault();
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const touch = e.changedTouches[0];
+      if (touch) {
+        const x = touch.clientX - rect.left;
+        processCanvasClick(x);
+      }
+    }
   };
 
   const draw = useCallback(() => {
@@ -665,6 +697,20 @@ export default function Canvas2D({
       );
     }
 
+    // ======== Sketch Mode Visual Separation ========
+    if (activeTool === 'draw_beam') {
+      ctx.fillStyle = 'rgba(2, 6, 23, 0.85)'; // slate-950 z opacity 85%
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.fillStyle = '#3b82f6';
+      ctx.font = 'bold 22px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('✏️ TRYB SZKICOWANIA', w / 2, h / 2 - 20);
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Narysuj poziomą linię, aby wygenerować nowy, czysty układ.', w / 2, h / 2 + 10);
+    }
+
     // ======== Draw Active Sketch Stroke (Faza 4) ========
     if (currentStroke.length > 1) {
       ctx.strokeStyle = 'rgba(59, 130, 246, 0.75)'; // premium semi-transparent neon blue
@@ -684,7 +730,7 @@ export default function Canvas2D({
       // Reset shadow
       ctx.shadowBlur = 0;
     }
-  }, [results, supports, pointLoads, beamLength, load, activeTool, currentStroke]);
+  }, [results, supports, pointLoads, beamLength, load, activeTool, currentStroke, model, toastMessage]);
 
   useEffect(() => {
     draw();
