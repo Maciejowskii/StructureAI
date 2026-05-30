@@ -133,11 +133,14 @@ interface Support {
   type: 'Pinned' | 'Fixed';
 }
 
+export type ToolMode = 'select' | 'draw_beam' | 'add_point_load' | 'add_support';
+
 // =============================================================================
 // App Component
 // =============================================================================
 
 export default function App() {
+  const [activeTool, setActiveTool] = useState<ToolMode>('select');
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState(false);
   const [results, setResults] = useState<ResultPoint[] | null>(null);
@@ -522,27 +525,52 @@ export default function App() {
       <div className="main-content">
         {/* ----- Left Toolbar ----- */}
         <nav className="toolbar">
-          <button className="toolbar__btn toolbar__btn--active" data-tooltip="Wskaźnik" id="tool-select">
+          <button 
+            className={`toolbar__btn ${activeTool === 'select' ? 'toolbar__btn--active' : ''}`} 
+            data-tooltip="Wskaźnik (Wybierz)" 
+            onClick={() => setActiveTool('select')}
+            id="tool-select"
+          >
             ◇
           </button>
-          <button className="toolbar__btn" data-tooltip="Dodaj węzeł" id="tool-node">
+          <button className="toolbar__btn" data-tooltip="Dodaj węzeł" id="tool-node" disabled>
             ⊕
           </button>
-          <button className="toolbar__btn" data-tooltip="Dodaj belkę" id="tool-beam">
-            ─
+          <button 
+            className={`toolbar__btn ${activeTool === 'draw_beam' ? 'toolbar__btn--active' : ''}`} 
+            data-tooltip="Rysuj belkę (Odręczny szkic)" 
+            onClick={() => setActiveTool('draw_beam')}
+            id="tool-beam"
+          >
+            ✏
           </button>
           <div className="toolbar__separator" />
-          <button className="toolbar__btn" data-tooltip="Podpora stała" id="tool-pinned">
+          <button 
+            className={`toolbar__btn ${activeTool === 'add_support' ? 'toolbar__btn--active' : ''}`} 
+            data-tooltip="Dodaj podporę stałą" 
+            onClick={() => setActiveTool('add_support')}
+            id="tool-pinned"
+          >
             △
           </button>
-          <button className="toolbar__btn" data-tooltip="Podpora przesuwna" id="tool-roller">
+          <button 
+            className={`toolbar__btn ${activeTool === 'add_support' ? 'toolbar__btn--active' : ''}`} 
+            data-tooltip="Dodaj podporę przesuwną" 
+            onClick={() => setActiveTool('add_support')}
+            id="tool-roller"
+          >
             ○
           </button>
           <div className="toolbar__separator" />
-          <button className="toolbar__btn" data-tooltip="Obciążenie skupione" id="tool-point-load">
+          <button 
+            className={`toolbar__btn ${activeTool === 'add_point_load' ? 'toolbar__btn--active' : ''}`} 
+            data-tooltip="Dodaj obciążenie skupione" 
+            onClick={() => setActiveTool('add_point_load')}
+            id="tool-point-load"
+          >
             ↓
           </button>
-          <button className="toolbar__btn" data-tooltip="Obciążenie ciągłe" id="tool-dist-load">
+          <button className="toolbar__btn" data-tooltip="Obciążenie ciągłe" id="tool-dist-load" disabled>
             ⇣
           </button>
           <div className="toolbar__separator" />
@@ -568,7 +596,16 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <Canvas2D results={results} supports={supports} pointLoads={pointLoads} beamLength={beamLength} load={loadValue} />
+            <Canvas2D 
+              results={results} 
+              supports={supports} 
+              pointLoads={pointLoads} 
+              beamLength={beamLength} 
+              load={loadValue} 
+              activeTool={activeTool}
+              setActiveTool={setActiveTool}
+              setBeamLength={setBeamLength}
+            />
           )}
         </div>
 

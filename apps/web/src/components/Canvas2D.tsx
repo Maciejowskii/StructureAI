@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, useState } from 'react';
 
 // =============================================================================
 // Types matching the Rust solver output
@@ -29,6 +29,9 @@ interface Canvas2DProps {
   pointLoads: PointLoad[];
   beamLength: number;
   load: number;
+  activeTool: 'select' | 'draw_beam' | 'add_point_load' | 'add_support';
+  setBeamLength: (length: number) => void;
+  setActiveTool: (tool: 'select' | 'draw_beam' | 'add_point_load' | 'add_support') => void;
 }
 
 // =============================================================================
@@ -287,8 +290,113 @@ function drawMeshDiagram(
 // Canvas2D Component
 // =============================================================================
 
-export default function Canvas2D({ results, supports, pointLoads, beamLength, load }: Canvas2DProps) {
+export default function Canvas2D({ 
+  results, 
+  supports, 
+  pointLoads, 
+  beamLength, 
+  load,
+  activeTool,
+  setBeamLength,
+  setActiveTool
+}: Canvas2DProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [currentStroke, setCurrentStroke] = useState<{ x: number; y: number }[]>([]);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Auto-dismiss toast message after 2.5s
+  useEffect(() => {
+    if (toastMessage) {
+      const timer = setTimeout(() => setToastMessage(null), 2500);
+      return () => clearTimeout(timer);
+    }
+  }, [toastMessage]);
+
+  const getCanvasCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top
+    };
+  };
+
+  const getTouchCoords = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas || e.touches.length === 0) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: e.touches[0].clientX - rect.left,
+      y: e.touches[0].clientY - rect.top
+    };
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (activeTool !== 'draw_beam') return;
+    const coords = getCanvasCoords(e);
+    setIsDrawing(true);
+    setCurrentStroke([coords]);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (activeTool !== 'draw_beam' || !isDrawing) return;
+    const coords = getCanvasCoords(e);
+    setCurrentStroke(prev => [...prev, coords]);
+  };
+
+  const handleMouseUp = () => {
+    if (activeTool !== 'draw_beam' || !isDrawing) return;
+    setIsDrawing(false);
+
+    if (currentStroke.length >= 2) {
+      const xs = currentStroke.map(p => p.x);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const pixelWidth = maxX - minX;
+
+      // Only trigger if line is drawn at least 40px wide to avoid accidental clicks
+      if (pixelWidth >= 40) {
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const w = canvas.clientWidth;
+          const beamPixelLen = w - 160; // 80 left margin + 80 right margin
+          const pixelsPerMeter = beamPixelLen / beamLength;
+          let newLen = pixelWidth / pixelsPerMeter;
+          newLen = Math.round(newLen * 2.0) / 2.0; // round to nearest 0.5m
+          newLen = Math.max(1.0, Math.min(20.0, newLen)); // clamp between 1.0m and 20.0m
+
+          setBeamLength(newLen);
+          setToastMessage(`✏️ Wykryto odręczny szkic belki: L = ${newLen.toFixed(1)} m`);
+        }
+      }
+    }
+
+    setCurrentStroke([]);
+    setActiveTool('select');
+  };
+
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (activeTool !== 'draw_beam') return;
+    e.preventDefault(); // prevent scroll
+    const coords = getTouchCoords(e);
+    setIsDrawing(true);
+    setCurrentStroke([coords]);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (activeTool !== 'draw_beam' || !isDrawing) return;
+    e.preventDefault();
+    const coords = getTouchCoords(e);
+    setCurrentStroke(prev => [...prev, coords]);
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (activeTool !== 'draw_beam' || !isDrawing) return;
+    e.preventDefault();
+    handleMouseUp();
+  };
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -484,7 +592,6 @@ export default function Canvas2D({ results, supports, pointLoads, beamLength, lo
     // ======== Results Diagrams ========
     if (results && results.length > 0) {
       // 1. Bending Moment (M)
-      // Positive moment is plotted on the tension side (downwards in civil engineering)
       const momentBaseY = beamY + 140;
       const maxMoment = Math.max(...results.map(r => Math.abs(r.moment)));
       const momentScale = maxMoment > 0 ? 45 / maxMoment : 1;
@@ -511,7 +618,6 @@ export default function Canvas2D({ results, supports, pointLoads, beamLength, lo
       );
 
       // 3. Deflection (δ)
-      // Deflection is naturally negative downward in the solver, so we don't invert it.
       const deflBaseY = beamY + 380;
       const maxDefl = Math.max(...results.map(r => Math.abs(r.deflection)));
       const deflScale = maxDefl > 0 ? 30 / maxDefl : 1;
@@ -524,7 +630,27 @@ export default function Canvas2D({ results, supports, pointLoads, beamLength, lo
         false,
       );
     }
-  }, [results, supports, pointLoads, beamLength, load]);
+
+    // ======== Draw Active Sketch Stroke (Faza 4) ========
+    if (currentStroke.length > 1) {
+      ctx.strokeStyle = 'rgba(59, 130, 246, 0.75)'; // premium semi-transparent neon blue
+      ctx.lineWidth = 4;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.shadowColor = '#3b82f6';
+      ctx.shadowBlur = 8;
+
+      ctx.beginPath();
+      ctx.moveTo(currentStroke[0].x, currentStroke[0].y);
+      for (let i = 1; i < currentStroke.length; i++) {
+        ctx.lineTo(currentStroke[i].x, currentStroke[i].y);
+      }
+      ctx.stroke();
+
+      // Reset shadow
+      ctx.shadowBlur = 0;
+    }
+  }, [results, supports, pointLoads, beamLength, load, activeTool, currentStroke]);
 
   useEffect(() => {
     draw();
@@ -534,5 +660,61 @@ export default function Canvas2D({ results, supports, pointLoads, beamLength, lo
     return () => window.removeEventListener('resize', handleResize);
   }, [draw]);
 
-  return <canvas ref={canvasRef} style={{ position: 'absolute', inset: 0 }} />;
+  return (
+    <div style={{ position: 'absolute', inset: 0, overflow: 'hidden' }}>
+      <canvas
+        ref={canvasRef}
+        style={{ 
+          position: 'absolute', 
+          inset: 0, 
+          cursor: activeTool === 'draw_beam' ? 'crosshair' : 'default',
+          touchAction: activeTool === 'draw_beam' ? 'none' : 'auto'
+        }}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+      />
+      
+      {/* Visual Toast Notification Overlay (Faza 4) */}
+      {toastMessage && (
+        <div style={{
+          position: 'absolute',
+          top: '20px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: 'rgba(30, 41, 59, 0.75)',
+          backdropFilter: 'blur(12px)',
+          border: '1px solid rgba(59, 130, 246, 0.3)',
+          boxShadow: '0 4px 20px rgba(59, 130, 246, 0.15), 0 0 15px rgba(59, 130, 246, 0.1)',
+          padding: '10px 20px',
+          borderRadius: '12px',
+          color: '#e2e8f0',
+          fontSize: '13px',
+          fontWeight: '600',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          zIndex: 100,
+          pointerEvents: 'none',
+          animation: 'fadeInOut 2.5s ease-in-out forwards',
+        }}>
+          {toastMessage}
+        </div>
+      )}
+
+      {/* Embedded CSS for Toast fade animation */}
+      <style>{`
+        @keyframes fadeInOut {
+          0% { opacity: 0; transform: translate(-50%, -10px); }
+          10% { opacity: 1; transform: translate(-50%, 0); }
+          90% { opacity: 1; transform: translate(-50%, 0); }
+          100% { opacity: 0; transform: translate(-50%, -10px); }
+        }
+      `}</style>
+    </div>
+  );
 }
