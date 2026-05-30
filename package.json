@@ -1,0 +1,19 @@
+{
+  "name": "structurai-dynamics",
+  "version": "0.1.0",
+  "private": true,
+  "description": "StructurAI Dynamics - Real-time FEM structural analysis with AI optimization",
+  "workspaces": [
+    "apps/*",
+    "packages/solver-wasm/pkg"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspace=apps/web",
+    "build:wasm": "cd packages/solver-wasm && wasm-pack build --target web --out-dir pkg",
+    "test:wasm": "cd packages/solver-wasm && cargo test"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
