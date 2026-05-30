@@ -7,16 +7,42 @@ import Canvas2D, { type ResultPoint } from './components/Canvas2D';
 
 type SolveFn = (input: any) => any;
 let solveMeshFn: SolveFn | null = null;
+let optimizeSectionsFn: SolveFn | null = null;
 
-async function initWasm(): Promise<SolveFn | null> {
+async function initWasm(): Promise<boolean> {
   try {
     const wasmModule = await import('solver-wasm');
     await wasmModule.default();
-    return wasmModule.solve_mesh;
+    solveMeshFn = wasmModule.solve_mesh;
+    optimizeSectionsFn = wasmModule.optimize_sections;
+    return true;
   } catch (err) {
     console.warn('[StructurAI] WASM module not available, using mock solver:', err);
-    return null;
+    return false;
   }
+}
+
+export interface PointLoad {
+  id: string;
+  x: number;
+  value: number; // kN, negative is downwards
+}
+
+export interface OptimizationResult {
+  name: string;
+  utilization_sgn: number;
+  deflection_sgu: number;
+  limit_sgu: number;
+  weight: number;
+  price_factor: number;
+}
+
+export interface OptimizerOutput {
+  success: boolean;
+  error: string | null;
+  cheapest: OptimizationResult | null;
+  lightest: OptimizationResult | null;
+  balanced: OptimizationResult | null;
 }
 
 // Mock solver for development without WASM
@@ -26,6 +52,7 @@ function mockSolver(inputModel: any): any {
     const nodes = inputModel.nodes;
     const elements = inputModel.elements;
     const distributed_loads = inputModel.distributed_loads;
+    const point_loads = inputModel.point_loads || [];
 
     for (let i = 0; i < elements.length; i++) {
       const el = elements[i];
@@ -38,19 +65,45 @@ function mockSolver(inputModel: any): any {
       const E = el.e;
       const I = el.i_inertia;
 
+      // Find concentrated loads inside this element segment
+      const elPointLoads = point_loads.filter((pl: any) => pl.x >= startNode.x && pl.x <= endNode.x);
+
       // Simple parabolic approximation for fallback
       const numPoints = 50;
       for (let step = 0; step <= numPoints; step++) {
         const x_loc = (step / numPoints) * length;
         // deflection: 5qL^4/(384EI) * sin(pi*x/L)
-        const deflMax = (5 * q * 1000 * Math.pow(length, 4)) / (384 * E * I) * 1000; // mm
-        const deflection = -deflMax * Math.sin((Math.PI * x_loc) / length);
+        const deflMax = (5 * q * Math.pow(length, 4)) / (384 * E * I * 1e-3); // mm
+        let deflection = -deflMax * Math.sin((Math.PI * x_loc) / length);
 
-        // moment: qLx/2 - qx^2/2
-        const moment = -((q * length * x_loc) / 2 - (q * x_loc * x_loc) / 2);
+        // Add dummy displacement from point loads
+        elPointLoads.forEach((pl: any) => {
+          const pVal = Math.abs(pl.value);
+          const pDefl = (pVal * Math.pow(length, 3)) / (48 * E * I * 1e-3);
+          deflection -= pDefl * Math.sin((Math.PI * x_loc) / length);
+        });
 
-        // shear: qL/2 - qx
-        const shear = -((q * length) / 2 - q * x_loc);
+        // moment: qLx/2 - qx^2/2 + concentrated moment
+        let moment = -((q * length * x_loc) / 2 - (q * x_loc * x_loc) / 2);
+        elPointLoads.forEach((pl: any) => {
+          const a = pl.x - startNode.x;
+          if (x_loc <= a) {
+            moment -= (Math.abs(pl.value) * (length - a) * x_loc) / length;
+          } else {
+            moment -= (Math.abs(pl.value) * a * (length - x_loc)) / length;
+          }
+        });
+
+        // shear: qL/2 - qx + concentrated shear
+        let shear = -((q * length) / 2 - q * x_loc);
+        elPointLoads.forEach((pl: any) => {
+          const a = pl.x - startNode.x;
+          if (x_loc <= a) {
+            shear -= (Math.abs(pl.value) * (length - a)) / length;
+          } else {
+            shear += (Math.abs(pl.value) * a) / length;
+          }
+        });
 
         results.push({
           global_x: startNode.x + x_loc,
@@ -85,6 +138,7 @@ export default function App() {
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState(false);
   const [results, setResults] = useState<ResultPoint[] | null>(null);
+  const [optResults, setOptResults] = useState<OptimizerOutput | null>(null);
   const [beamLength, setBeamLength] = useState(5.0);
   const [loadValue, setLoadValue] = useState(10.0);
   const [sectionId, setSectionId] = useState('IPE200');
@@ -93,12 +147,12 @@ export default function App() {
     { id: 'S1', x: 0, type: 'Pinned' },
     { id: 'S2', x: 5.0, type: 'Pinned' },
   ]);
+  const [pointLoads, setPointLoads] = useState<PointLoad[]>([]);
 
   // Initialize WASM
   useEffect(() => {
-    initWasm().then((fn) => {
-      if (fn) {
-        solveMeshFn = fn;
+    initWasm().then((success) => {
+      if (success) {
         setWasmReady(true);
       } else {
         setWasmError(true);
@@ -116,6 +170,16 @@ export default function App() {
         // Clamp intermediate supports to be within the beam span
         return { ...s, x: Math.min(Math.max(s.x, 0.5), beamLength - 0.5) };
       });
+    });
+  }, [beamLength]);
+
+  // Clamp point loads when beamLength changes
+  useEffect(() => {
+    setPointLoads(prev => {
+      return prev.map(pl => ({
+        ...pl,
+        x: Math.min(Math.max(pl.x, 0.1), beamLength - 0.1),
+      }));
     });
   }, [beamLength]);
 
@@ -160,6 +224,38 @@ export default function App() {
     });
   };
 
+  const addPointLoad = () => {
+    if (pointLoads.length >= 5) return;
+    const newX = parseFloat((beamLength / 2).toFixed(1));
+    setPointLoads(prev => [
+      ...prev,
+      {
+        id: `PL_${Date.now()}`,
+        x: newX,
+        value: -20.0, // default -20 kN (downwards)
+      }
+    ]);
+  };
+
+  const removePointLoad = (id: string) => {
+    setPointLoads(prev => prev.filter(pl => pl.id !== id));
+  };
+
+  const updatePointLoadX = (id: string, x: number) => {
+    setPointLoads(prev => prev.map(pl => {
+      if (pl.id !== id) return pl;
+      const clampedX = Math.min(Math.max(x, 0.1), beamLength - 0.1);
+      return { ...pl, x: parseFloat(clampedX.toFixed(1)) };
+    }));
+  };
+
+  const updatePointLoadVal = (id: string, value: number) => {
+    setPointLoads(prev => prev.map(pl => {
+      if (pl.id !== id) return pl;
+      return { ...pl, value: parseFloat(value.toFixed(1)) };
+    }));
+  };
+
   // Solve function
   const solve = useCallback(() => {
     // Sort nodes by X coordinate
@@ -195,10 +291,16 @@ export default function App() {
       value: -loadValue,
     }));
 
+    const mappedPointLoads = pointLoads.map(pl => ({
+      x: pl.x,
+      value: pl.value,
+    }));
+
     const inputModel = {
       nodes,
       elements,
       distributed_loads,
+      point_loads: mappedPointLoads,
     };
 
     const t0 = performance.now();
@@ -208,11 +310,31 @@ export default function App() {
 
     if (output && output.success) {
       setResults(output.results);
-      console.log('[StructurAI] Solver output points count:', output.results.length);
     } else {
       console.error('[StructurAI] Solver error:', output?.error);
     }
-  }, [beamLength, loadValue, sectionId, supports]);
+
+    // Run AI section optimization in real-time
+    if (optimizeSectionsFn) {
+      const optOut = optimizeSectionsFn(inputModel);
+      if (optOut && optOut.success) {
+        setOptResults(optOut);
+        console.log('[StructurAI] AI section optimization complete');
+      } else {
+        console.warn('[StructurAI] AI section optimizer returned error:', optOut?.error);
+        setOptResults(null);
+      }
+    } else {
+      // Mock optimizer output if WASM is not loaded
+      setOptResults({
+        success: true,
+        error: null,
+        cheapest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: 20.0, weight: 12.9, price_factor: 1.0 },
+        lightest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: 20.0, weight: 12.9, price_factor: 1.0 },
+        balanced: { name: 'IPE 200', utilization_sgn: 0.44, deflection_sgu: 5.1, limit_sgu: 20.0, weight: 22.4, price_factor: 1.0 }
+      });
+    }
+  }, [beamLength, loadValue, sectionId, supports, pointLoads]);
 
   // Auto-solve on parameter change (real-time!)
   useEffect(() => {
@@ -290,7 +412,7 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <Canvas2D results={results} supports={supports} beamLength={beamLength} load={loadValue} />
+            <Canvas2D results={results} supports={supports} pointLoads={pointLoads} beamLength={beamLength} load={loadValue} />
           )}
         </div>
 
@@ -401,9 +523,83 @@ export default function App() {
             </div>
           </div>
 
+          {/* Point Loads */}
+          <div className="properties-panel__section">
+            <div className="properties-panel__section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>Siły skupione</span>
+              <button 
+                className="btn btn--primary" 
+                onClick={addPointLoad} 
+                style={{ padding: '2px 8px', fontSize: '11px', height: 'auto', borderRadius: '4px' }}
+                disabled={pointLoads.length >= 5}
+              >
+                + Dodaj
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+              {pointLoads.map((pl, idx) => (
+                <div key={pl.id} style={{ 
+                  background: 'rgba(255,255,255,0.03)', 
+                  padding: '8px 12px', 
+                  borderRadius: '8px', 
+                  border: '1px solid rgba(255,255,255,0.06)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#f97316' }}>
+                      Siła P{idx + 1} (x = {pl.x.toFixed(1)}m)
+                    </span>
+                    <button 
+                      onClick={() => removePointLoad(pl.id)}
+                      style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '11px', cursor: 'pointer', padding: 0 }}
+                    >
+                      Usuń
+                    </button>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginTop: '4px' }}>
+                    <label style={{ fontSize: '10px', color: '#64748b' }}>Pozycja [m]</label>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max={beamLength - 0.1}
+                      step="0.1"
+                      value={pl.x}
+                      onChange={(e) => updatePointLoadX(pl.id, parseFloat(e.target.value))}
+                      style={{ width: '100%', accentColor: '#f97316', height: '4px' }}
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginTop: '4px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <label style={{ fontSize: '10px', color: '#64748b' }}>Wartość [kN]</label>
+                      <span className="mono-value" style={{ fontSize: '10px', color: '#f97316', fontWeight: 'bold' }}>{pl.value.toFixed(1)} kN</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-100"
+                      max="100"
+                      step="5"
+                      value={pl.value}
+                      onChange={(e) => updatePointLoadVal(pl.id, parseFloat(e.target.value))}
+                      style={{ width: '100%', accentColor: '#f97316', height: '4px' }}
+                    />
+                  </div>
+                </div>
+              ))}
+              {pointLoads.length === 0 && (
+                <div style={{ fontSize: '11px', color: '#64748b', fontStyle: 'italic', textAlign: 'center', padding: '6px 0' }}>
+                  Brak sił skupionych. Dodaj siłę przyciskiem powyżej.
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* Load */}
           <div className="properties-panel__section">
-            <div className="properties-panel__section-title">Obciążenie</div>
+            <div className="properties-panel__section-title">Obciążenie ciągłe</div>
             <label className="param-label" htmlFor="param-load">
               Obciążenie ciągłe [kN/m]
             </label>
@@ -441,6 +637,105 @@ export default function App() {
               <option value="HEB300">HEB 300</option>
             </select>
           </div>
+
+          {/* AI Section Recommendation */}
+          {optResults && optResults.success && (
+            <div className="properties-panel__section">
+              <div className="properties-panel__section-title">Optymalizacja Przekroju AI</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+                
+                {/* Cheapest (Najtańszy) */}
+                {optResults.cheapest && (
+                  <div 
+                    onClick={() => setSectionId(optResults.cheapest!.name.replace(' ', ''))}
+                    style={{ 
+                      background: sectionId === optResults.cheapest.name.replace(' ', '') ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255,255,255,0.02)', 
+                      border: sectionId === optResults.cheapest.name.replace(' ', '') ? '1px solid #10b981' : '1px solid rgba(255,255,255,0.06)',
+                      padding: '10px 12px',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                    className="opt-card"
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#10b981' }}>🟢 Najtańszy profil</span>
+                      <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.cheapest.weight.toFixed(1)} kg/m</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                      <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.cheapest.name}</span>
+                      <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.cheapest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
+                        Wytężenie: {(optResults.cheapest.utilization_sgn * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                      Ugięcie: {optResults.cheapest.deflection_sgu.toFixed(1)} mm / {optResults.cheapest.limit_sgu.toFixed(1)} mm
+                    </div>
+                  </div>
+                )}
+
+                {/* Lightest (Najlżejszy) */}
+                {optResults.lightest && (
+                  <div 
+                    onClick={() => setSectionId(optResults.lightest!.name.replace(' ', ''))}
+                    style={{ 
+                      background: sectionId === optResults.lightest.name.replace(' ', '') ? 'rgba(6, 182, 212, 0.12)' : 'rgba(255,255,255,0.02)', 
+                      border: sectionId === optResults.lightest.name.replace(' ', '') ? '1px solid #06b6d4' : '1px solid rgba(255,255,255,0.06)',
+                      padding: '10px 12px',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                    className="opt-card"
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#06b6d4' }}>⚡ Najlżejszy profil (Eco)</span>
+                      <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.lightest.weight.toFixed(1)} kg/m</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                      <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.lightest.name}</span>
+                      <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.lightest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
+                        Wytężenie: {(optResults.lightest.utilization_sgn * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                      Ugięcie: {optResults.lightest.deflection_sgu.toFixed(1)} mm / {optResults.lightest.limit_sgu.toFixed(1)} mm
+                    </div>
+                  </div>
+                )}
+
+                {/* Balanced (Zrównoważony) */}
+                {optResults.balanced && (
+                  <div 
+                    onClick={() => setSectionId(optResults.balanced!.name.replace(' ', ''))}
+                    style={{ 
+                      background: sectionId === optResults.balanced.name.replace(' ', '') ? 'rgba(139, 92, 246, 0.12)' : 'rgba(255,255,255,0.02)', 
+                      border: sectionId === optResults.balanced.name.replace(' ', '') ? '1px solid #8b5cf6' : '1px solid rgba(255,255,255,0.06)',
+                      padding: '10px 12px',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                    className="opt-card"
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b5cf6' }}>⚖ Zrównoważony profil (60-70%)</span>
+                      <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.balanced.weight.toFixed(1)} kg/m</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                      <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.balanced.name}</span>
+                      <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#8b5cf6' }}>
+                        Wytężenie: {(optResults.balanced.utilization_sgn * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                      Ugięcie: {optResults.balanced.deflection_sgu.toFixed(1)} mm / {optResults.balanced.limit_sgu.toFixed(1)} mm
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Results */}
           {results && (() => {

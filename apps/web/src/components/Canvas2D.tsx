@@ -17,9 +17,16 @@ export interface Support {
   type: 'Pinned' | 'Fixed';
 }
 
+export interface PointLoad {
+  id: string;
+  x: number;
+  value: number; // kN
+}
+
 interface Canvas2DProps {
   results: ResultPoint[] | null;
   supports: Support[];
+  pointLoads: PointLoad[];
   beamLength: number;
   load: number;
 }
@@ -280,7 +287,7 @@ function drawMeshDiagram(
 // Canvas2D Component
 // =============================================================================
 
-export default function Canvas2D({ results, supports, beamLength, load }: Canvas2DProps) {
+export default function Canvas2D({ results, supports, pointLoads, beamLength, load }: Canvas2DProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const draw = useCallback(() => {
@@ -391,6 +398,50 @@ export default function Canvas2D({ results, supports, beamLength, load }: Canvas
       ctx.fillText(`q = ${Math.abs(load).toFixed(1)} kN/m`, (startX + endX) / 2, loadTop - 7);
     }
 
+    // ======== Point Loads (Siły skupione) ========
+    pointLoads.forEach((pl, idx) => {
+      if (pl.value === 0) return;
+      const px = startX + (pl.x / beamLength) * beamPixelLen;
+      const isDownward = pl.value < 0;
+      const arrowColor = '#f97316'; // premium orange color
+      
+      ctx.strokeStyle = arrowColor;
+      ctx.fillStyle = arrowColor;
+      ctx.lineWidth = 2.5;
+
+      const arrowHeight = 35;
+      
+      if (isDownward) {
+        // Arrow pointing down, tip touching the top edge of the beam
+        const arrowTop = beamY - beamThick / 2 - arrowHeight;
+        const arrowBottom = beamY - beamThick / 2 - 3;
+        drawArrow(ctx, px, arrowTop, px, arrowBottom, 8);
+        
+        // Text label above the arrow
+        ctx.fillStyle = '#ffedd5'; // bright orange-tinted text
+        ctx.font = `bold 10px 'JetBrains Mono', monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText(`P${idx + 1} = ${Math.abs(pl.value).toFixed(1)} kN`, px, arrowTop - 5);
+        ctx.fillStyle = COLORS.text;
+        ctx.font = `500 8.5px 'JetBrains Mono', monospace`;
+        ctx.fillText(`x = ${pl.x.toFixed(1)}m`, px, arrowTop - 15);
+      } else {
+        // Arrow pointing up, tip touching the bottom edge of the beam
+        const arrowBottom = beamY + beamThick / 2 + arrowHeight;
+        const arrowTop = beamY + beamThick / 2 + 3;
+        drawArrow(ctx, px, arrowBottom, px, arrowTop, 8);
+        
+        // Text label below the arrow
+        ctx.fillStyle = '#ffedd5';
+        ctx.font = `bold 10px 'JetBrains Mono', monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText(`P${idx + 1} = ${Math.abs(pl.value).toFixed(1)} kN`, px, arrowBottom + 12);
+        ctx.fillStyle = COLORS.text;
+        ctx.font = `500 8.5px 'JetBrains Mono', monospace`;
+        ctx.fillText(`x = ${pl.x.toFixed(1)}m`, px, arrowBottom + 21);
+      }
+    });
+
     // ======== Continuous Dimension Line ========
     const dimY = beamY + 60;
     ctx.strokeStyle = COLORS.dimLine;
@@ -473,7 +524,7 @@ export default function Canvas2D({ results, supports, beamLength, load }: Canvas
         false,
       );
     }
-  }, [results, supports, beamLength, load]);
+  }, [results, supports, pointLoads, beamLength, load]);
 
   useEffect(() => {
     draw();
