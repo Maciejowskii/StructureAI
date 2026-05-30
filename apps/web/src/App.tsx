@@ -316,6 +316,7 @@ export default function App() {
       elements,
       distributed_loads,
       point_loads: mappedPointLoads,
+      geometry: { length: beamLength }
     };
 
     const t0 = performance.now();
@@ -401,12 +402,14 @@ export default function App() {
         }
       } else {
         // Mock optimizer output if WASM is not loaded
+        const currentLength = inputModel.geometry.length || 5.0;
+        const sguLimit = (currentLength * 1000) / 250; // mm
         setOptResults({
           success: true,
           error: null,
-          cheapest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: 20.0, weight: 12.9, price_factor: 1.0 },
-          lightest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: 20.0, weight: 12.9, price_factor: 1.0 },
-          balanced: { name: 'IPE 200', utilization_sgn: 0.44, deflection_sgu: 5.1, limit_sgu: 20.0, weight: 22.4, price_factor: 1.0 }
+          cheapest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: sguLimit, weight: 12.9, price_factor: 1.0 },
+          lightest: { name: 'IPE 140', utilization_sgn: 0.88, deflection_sgu: 18.2, limit_sgu: sguLimit, weight: 12.9, price_factor: 1.0 },
+          balanced: { name: 'IPE 200', utilization_sgn: 0.44, deflection_sgu: 5.1, limit_sgu: sguLimit, weight: 22.4, price_factor: 1.0 }
         });
       }
     }
@@ -502,6 +505,13 @@ export default function App() {
 
   const handleSketchComplete = (newLength: number) => {
     setBeamLength(newLength);
+    // Automatyczne ustawienie podpór na krańcach narysowanej belki
+    setSupports([
+      { id: 'S1', x: 0, type: 'Pinned' },
+      { id: 'S2', x: newLength, type: 'Pinned' }
+    ]);
+    // Wyczyszczenie starych obciążeń skupionych, bo mogły znaleźć się poza belką
+    setPointLoads([]); 
     setActiveTool('select');
   };
 
@@ -917,7 +927,7 @@ export default function App() {
               {/* AI Section Recommendation */}
               {optResults && optResults.success && (
                 <div className="properties-panel__section">
-                  <div className="properties-panel__section-title">Optymalizacja Przekroju AI</div>
+                  <div className="properties-panel__section-title">Optymalizator Generatywny</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
                     
                     {/* Cheapest (Najtańszy) */}

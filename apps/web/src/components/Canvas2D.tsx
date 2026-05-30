@@ -312,7 +312,7 @@ export default function Canvas2D({
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Dynamic fallback resolution to handle both detailed properties and model/result objects
-  const beamLengthToUse = beamLength ?? (model?.nodes ? Math.max(...model.nodes.map((n: any) => n.x)) : 5.0);
+  const beamLengthToUse = beamLength ?? (model?.geometry?.length || (model?.nodes ? Math.max(...model.nodes.map((n: any) => n.x)) : 5.0));
   const supportsToUse: Support[] = supports ?? (model?.nodes ? model.nodes.map((n: any) => ({
     id: n.id,
     x: n.x,
@@ -443,17 +443,18 @@ export default function Canvas2D({
     const results = resultsToUse;
     const supports = supportsToUse;
     const pointLoads = pointLoadsToUse;
-    const beamLength = beamLengthToUse;
+    const beamLength = model?.geometry?.length || beamLengthToUse || 5.0;
     const load = loadToUse;
 
     // Minor/major background grid
     drawGrid(ctx, w, h);
 
     // Sizing and layout
-    const margin = { left: 80, right: 80, top: 60, bottom: 60 };
+    const margin = { left: 50, right: 50, top: 60, bottom: 60 };
     const beamY = margin.top + 60;
-    const beamPixelLen = w - margin.left - margin.right;
-    const startX = margin.left;
+    const scaleX = (w - 100) / beamLength;
+    const beamPixelLen = w - 100;
+    const startX = 50;
     const endX = startX + beamPixelLen;
 
     // ======== Draw Beam Body ========
@@ -483,7 +484,7 @@ export default function Canvas2D({
 
     // ======== Draw Supports at actual X coords ========
     supports.forEach((s, idx) => {
-      const px = startX + (s.x / beamLength) * beamPixelLen;
+      const px = startX + s.x * scaleX;
       const isStart = idx === 0;
       const isEnd = idx === supports.length - 1;
       
@@ -536,7 +537,7 @@ export default function Canvas2D({
     // ======== Point Loads (Siły skupione) ========
     pointLoads.forEach((pl, idx) => {
       if (pl.value === 0) return;
-      const px = startX + (pl.x / beamLength) * beamPixelLen;
+      const px = startX + pl.x * scaleX;
       const isDownward = pl.value < 0;
       const arrowColor = '#f97316'; // premium orange color
       
@@ -594,7 +595,7 @@ export default function Canvas2D({
     
     // Support ticks
     supports.forEach((s) => {
-      const px = startX + (s.x / beamLength) * beamPixelLen;
+      const px = startX + s.x * scaleX;
       ctx.beginPath();
       ctx.moveTo(px, dimY - 3);
       ctx.lineTo(px, dimY + 3);
@@ -612,7 +613,7 @@ export default function Canvas2D({
     ctx.font = `600 11px 'Inter', sans-serif`;
     ctx.textAlign = 'center';
     supports.forEach((s, idx) => {
-      const px = startX + (s.x / beamLength) * beamPixelLen;
+      const px = startX + s.x * scaleX;
       ctx.fillText(`N${idx + 1}`, px, beamY + 45);
     });
 
