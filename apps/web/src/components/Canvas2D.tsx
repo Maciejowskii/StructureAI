@@ -344,14 +344,33 @@ export default function Canvas2D({
     };
   };
 
-  const getTouchCoords = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas || e.touches.length === 0) return { x: 0, y: 0 };
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: e.touches[0].clientX - rect.left,
-      y: e.touches[0].clientY - rect.top
-    };
+
+
+
+  // Shared sketch-finish logic (mouse and touch)
+  const finishSketch = (stroke: { x: number; y: number }[]) => {
+    if (stroke.length > 5) {
+      const xs = stroke.map(p => p.x);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const pixelWidth = maxX - minX;
+
+      if (pixelWidth > 50) {
+        const scaleX = (canvasRef.current?.width || 800) / (model?.geometry?.length || beamLengthToUse || 5) / 1.2;
+        const calculatedMeters = pixelWidth / scaleX;
+        const roundedMeters = Math.round(calculatedMeters * 2) / 2;
+
+        if (onSketchComplete) {
+          onSketchComplete(roundedMeters);
+        } else if (setBeamLength && setActiveTool) {
+          setBeamLength(roundedMeters);
+          setActiveTool('select');
+        }
+
+        setToastMessage(`✏️ Wykryto odręczny szkic belki: L = ${roundedMeters.toFixed(1)} m`);
+      }
+    }
+    setCurrentStroke([]);
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -370,52 +389,39 @@ export default function Canvas2D({
   const handleMouseUp = () => {
     if (activeTool !== 'draw_beam' || !isDrawing) return;
     setIsDrawing(false);
-
-    if (currentStroke.length > 5) {
-      const xs = currentStroke.map(p => p.x);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const pixelWidth = maxX - minX;
-
-      if (pixelWidth > 50) {
-        // Calculate scaleX using the formula in the prompt
-        const scaleX = (canvasRef.current?.width || 800) / (model?.geometry?.length || beamLengthToUse || 5) / 1.2;
-        const calculatedMeters = pixelWidth / scaleX;
-        const roundedMeters = Math.round(calculatedMeters * 2) / 2;
-
-        if (onSketchComplete) {
-          onSketchComplete(roundedMeters);
-        } else if (setBeamLength && setActiveTool) {
-          setBeamLength(roundedMeters);
-          setActiveTool('select');
-        }
-        
-        setToastMessage(`✏️ Wykryto odręczny szkic belki: L = ${roundedMeters.toFixed(1)} m`);
-      }
-    }
-
-    setCurrentStroke([]);
+    finishSketch(currentStroke);
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
     if (activeTool !== 'draw_beam') return;
-    e.preventDefault(); // prevent scroll
-    const coords = getTouchCoords(e);
+    e.preventDefault(); // Blokada scrolla na mobile
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const touch = e.touches[0];
+    const x = touch.clientX - rect.left;
+    const y = touch.clientY - rect.top;
     setIsDrawing(true);
-    setCurrentStroke([coords]);
+    setCurrentStroke([{ x, y }]);
   };
 
   const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
     if (activeTool !== 'draw_beam' || !isDrawing) return;
     e.preventDefault();
-    const coords = getTouchCoords(e);
-    setCurrentStroke(prev => [...prev, coords]);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const touch = e.touches[0];
+    const x = touch.clientX - rect.left;
+    const y = touch.clientY - rect.top;
+    setCurrentStroke(prev => [...prev, { x, y }]);
   };
 
   const handleTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
     if (activeTool !== 'draw_beam' || !isDrawing) return;
     e.preventDefault();
-    handleMouseUp();
+    setIsDrawing(false);
+    finishSketch(currentStroke);
   };
 
   const draw = useCallback(() => {
