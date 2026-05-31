@@ -276,9 +276,9 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         r[(2, 0)] = vz.x; r[(2, 1)] = vz.y; r[(2, 2)] = vz.z;
 
         let q = load.value;
-        let q_local_x = -q * 1000.0 * r[(0, 1)];
-        let q_local_y = -q * 1000.0 * r[(1, 1)];
-        let q_local_z = -q * 1000.0 * r[(2, 1)];
+        let q_local_x = q * 1000.0 * r[(0, 1)];
+        let q_local_y = q * 1000.0 * r[(1, 1)];
+        let q_local_z = q * 1000.0 * r[(2, 1)];
 
         let mut f_local = DVector::<f64>::zeros(12);
         f_local[0] = q_local_x * l / 2.0;
@@ -554,8 +554,8 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         let mut q_local_z = 0.0;
         if let Some(load) = input_model.loads.iter().find(|l| l.element_id == el.id) {
             let q = load.value;
-            q_local_y = -q * 1000.0 * r[(1, 1)];
-            q_local_z = -q * 1000.0 * r[(2, 1)];
+            q_local_y = q * 1000.0 * r[(1, 1)];
+            q_local_z = q * 1000.0 * r[(2, 1)];
         }
 
         let mut el_utils = vec![0.0; 5];

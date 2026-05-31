@@ -141,30 +141,30 @@ export type ToolMode = 'select' | 'draw_beam' | 'add_point_load' | 'add_support_
 export type AppMode = '2d' | '3d';
 
 export const STEEL_PROFILES_3D: Record<string, { area: number, iy: number, iz: number, j: number, wy: number, wz: number }> = {
-  'IPE100': { area: 10.3e-4, iz: 171e-8, iy: 15.9e-8, j: 1.2e-8, wz: 34.2e-6, wy: 5.79e-6 },
-  'IPE120': { area: 13.2e-4, iz: 318e-8, iy: 27.7e-8, j: 1.74e-8, wz: 53.0e-6, wy: 8.65e-6 },
-  'IPE140': { area: 16.4e-4, iz: 541e-8, iy: 44.9e-8, j: 2.45e-8, wz: 77.3e-6, wy: 12.3e-6 },
-  'IPE160': { area: 20.1e-4, iz: 869e-8, iy: 68.3e-8, j: 3.6e-8, wz: 109e-6, wy: 16.7e-6 },
-  'IPE180': { area: 23.9e-4, iz: 1317e-8, iy: 101e-8, j: 4.79e-8, wz: 146e-6, wy: 22.2e-6 },
-  'IPE200': { area: 28.5e-4, iz: 1943e-8, iy: 142e-8, j: 6.98e-8, wz: 194e-6, wy: 28.5e-6 },
-  'IPE220': { area: 33.4e-4, iz: 2772e-8, iy: 205e-8, j: 9.07e-8, wz: 252e-6, wy: 37.3e-6 },
-  'IPE240': { area: 39.1e-4, iz: 3892e-8, iy: 284e-8, j: 12.9e-8, wz: 324e-6, wy: 47.3e-6 },
-  'IPE270': { area: 45.9e-4, iz: 5790e-8, iy: 420e-8, j: 15.9e-8, wz: 429e-6, wy: 62.2e-6 },
-  'IPE300': { area: 53.8e-4, iz: 8356e-8, iy: 558e-8, j: 20.1e-8, wz: 557e-6, wy: 80.5e-6 },
-  'IPE330': { area: 62.6e-4, iz: 11770e-8, iy: 788e-8, j: 28.1e-8, wz: 713e-6, wy: 98.5e-6 },
-  'IPE360': { area: 72.7e-4, iz: 16270e-8, iy: 1043e-8, j: 37.3e-8, wz: 904e-6, wy: 123e-6 },
-  'IPE400': { area: 84.5e-4, iz: 23130e-8, iy: 1318e-8, j: 51.2e-8, wz: 1160e-6, wy: 146e-6 },
-  'HEB100': { area: 26.0e-4, iz: 450e-8, iy: 167e-8, j: 9.25e-8, wz: 89.9e-6, wy: 33.5e-6 },
-  'HEB120': { area: 34.0e-4, iz: 864e-8, iy: 318e-8, j: 14.5e-8, wz: 144e-6, wy: 52.9e-6 },
-  'HEB140': { area: 43.0e-4, iz: 1509e-8, iy: 550e-8, j: 24.4e-8, wz: 216e-6, wy: 78.5e-6 },
-  'HEB160': { area: 52.7e-4, iz: 2492e-8, iy: 889e-8, j: 36.5e-8, wz: 311e-6, wy: 111e-6 },
-  'HEB180': { area: 65.3e-4, iz: 3831e-8, iy: 1363e-8, j: 54.8e-8, wz: 426e-6, wy: 151e-6 },
-  'HEB200': { area: 78.1e-4, iz: 5696e-8, iy: 2003e-8, j: 59.3e-8, wz: 570e-6, wy: 200e-6 },
-  'HEB220': { area: 91.0e-4, iz: 7357e-8, iy: 2585e-8, j: 77.0e-8, wz: 673e-6, wy: 258e-6 },
-  'HEB240': { area: 106.0e-4, iz: 11260e-8, iy: 3923e-8, j: 103e-8, wz: 938e-6, wy: 327e-6 },
-  'HEB260': { area: 118.4e-4, iz: 14920e-8, iy: 5135e-8, j: 130e-8, wz: 1150e-6, wy: 395e-6 },
-  'HEB280': { area: 131.4e-4, iz: 19270e-8, iy: 6560e-8, j: 167e-8, wz: 1380e-6, wy: 468e-6 },
-  'HEB300': { area: 149.0e-4, iz: 25170e-8, iy: 8563e-8, j: 233e-8, wz: 1680e-6, wy: 571e-6 },
+  'IPE100': { area: 10.3, iz: 171, iy: 15.9, j: 1.2, wz: 34.2, wy: 5.79 },
+  'IPE120': { area: 13.2, iz: 318, iy: 27.7, j: 1.74, wz: 53.0, wy: 8.65 },
+  'IPE140': { area: 16.4, iz: 541, iy: 44.9, j: 2.45, wz: 77.3, wy: 12.3 },
+  'IPE160': { area: 20.1, iz: 869, iy: 68.3, j: 3.6, wz: 109, wy: 16.7 },
+  'IPE180': { area: 23.9, iz: 1317, iy: 101, j: 4.79, wz: 146, wy: 22.2 },
+  'IPE200': { area: 28.5, iz: 1943, iy: 142, j: 6.98, wz: 194, wy: 28.5 },
+  'IPE220': { area: 33.4, iz: 2772, iy: 205, j: 9.07, wz: 252, wy: 37.3 },
+  'IPE240': { area: 39.1, iz: 3892, iy: 284, j: 12.9, wz: 324, wy: 47.3 },
+  'IPE270': { area: 45.9, iz: 5790, iy: 420, j: 15.9, wz: 429, wy: 62.2 },
+  'IPE300': { area: 53.8, iz: 8356, iy: 558, j: 20.1, wz: 557, wy: 80.5 },
+  'IPE330': { area: 62.6, iz: 11770, iy: 788, j: 28.1, wz: 713, wy: 98.5 },
+  'IPE360': { area: 72.7, iz: 16270, iy: 1043, j: 37.3, wz: 904, wy: 123 },
+  'IPE400': { area: 84.5, iz: 23130, iy: 1318, j: 51.2, wz: 1160, wy: 146 },
+  'HEB100': { area: 26.0, iz: 450, iy: 167, j: 9.25, wz: 89.9, wy: 33.5 },
+  'HEB120': { area: 34.0, iz: 864, iy: 318, j: 14.5, wz: 144, wy: 52.9 },
+  'HEB140': { area: 43.0, iz: 1509, iy: 550, j: 24.4, wz: 216, wy: 78.5 },
+  'HEB160': { area: 52.7, iz: 2492, iy: 889, j: 36.5, wz: 311, wy: 111 },
+  'HEB180': { area: 65.3, iz: 3831, iy: 1363, j: 54.8, wz: 426, wy: 151 },
+  'HEB200': { area: 78.1, iz: 5696, iy: 2003, j: 59.3, wz: 570, wy: 200 },
+  'HEB220': { area: 91.0, iz: 7357, iy: 2585, j: 77.0, wz: 673, wy: 258 },
+  'HEB240': { area: 106.0, iz: 11260, iy: 3923, j: 103, wz: 938, wy: 327 },
+  'HEB260': { area: 118.4, iz: 14920, iy: 5135, j: 130, wz: 1150, wy: 395 },
+  'HEB280': { area: 131.4, iz: 19270, iy: 6560, j: 167, wz: 1380, wy: 468 },
+  'HEB300': { area: 149.0, iz: 25170, iy: 8563, j: 233, wz: 1680, wy: 571 },
 };
 
 // =============================================================================
@@ -502,21 +502,21 @@ export default function App() {
       // Columns
       elements.push({ 
         id: `Col_L_${b}`, startNode: `N_base_L_${b}`, endNode: `N_eaves_L_${b}`, 
-        ...colProps, groupId: "columns" 
+        ...colProps, iy: colProps.iy * 1e-8, iz: colProps.iz * 1e-8, area: colProps.area * 1e-4, wy: colProps.wy * 1e-6, wz: colProps.wz * 1e-6, groupId: "columns" 
       });
       elements.push({ 
         id: `Col_R_${b}`, startNode: `N_base_R_${b}`, endNode: `N_eaves_R_${b}`, 
-        ...colProps, groupId: "columns" 
+        ...colProps, iy: colProps.iy * 1e-8, iz: colProps.iz * 1e-8, area: colProps.area * 1e-4, wy: colProps.wy * 1e-6, wz: colProps.wz * 1e-6, groupId: "columns" 
       });
       
       // Rafters
       elements.push({ 
         id: `Raf_L_${b}`, startNode: `N_eaves_L_${b}`, endNode: `N_ridge_${b}`, 
-        ...rafProps, groupId: "rafters" 
+        ...rafProps, iy: rafProps.iy * 1e-8, iz: rafProps.iz * 1e-8, area: rafProps.area * 1e-4, wy: rafProps.wy * 1e-6, wz: rafProps.wz * 1e-6, groupId: "rafters" 
       });
       elements.push({ 
         id: `Raf_R_${b}`, startNode: `N_ridge_${b}`, endNode: `N_eaves_R_${b}`, 
-        ...rafProps, groupId: "rafters" 
+        ...rafProps, iy: rafProps.iy * 1e-8, iz: rafProps.iz * 1e-8, area: rafProps.area * 1e-4, wy: rafProps.wy * 1e-6, wz: rafProps.wz * 1e-6, groupId: "rafters" 
       });
     }
 
@@ -525,28 +525,28 @@ export default function App() {
       // Eaves girts
       elements.push({ 
         id: `Girt_L_${b}`, startNode: `N_eaves_L_${b}`, endNode: `N_eaves_L_${b+1}`, 
-        ...braceProps, groupId: "bracings" 
+        ...braceProps, iy: braceProps.iy * 1e-8, iz: braceProps.iz * 1e-8, area: braceProps.area * 1e-4, wy: braceProps.wy * 1e-6, wz: braceProps.wz * 1e-6, groupId: "bracings" 
       });
       elements.push({ 
         id: `Girt_R_${b}`, startNode: `N_eaves_R_${b}`, endNode: `N_eaves_R_${b+1}`, 
-        ...braceProps, groupId: "bracings" 
+        ...braceProps, iy: braceProps.iy * 1e-8, iz: braceProps.iz * 1e-8, area: braceProps.area * 1e-4, wy: braceProps.wy * 1e-6, wz: braceProps.wz * 1e-6, groupId: "bracings" 
       });
       
       // Ridge purlins
       elements.push({ 
         id: `Purlin_R_${b}`, startNode: `N_ridge_${b}`, endNode: `N_ridge_${b+1}`, 
-        ...braceProps, groupId: "bracings" 
+        ...braceProps, iy: braceProps.iy * 1e-8, iz: braceProps.iz * 1e-8, area: braceProps.area * 1e-4, wy: braceProps.wy * 1e-6, wz: braceProps.wz * 1e-6, groupId: "bracings" 
       });
 
       // X-bracing in the first and last bays (diagonal members)
       if (b === 0 || b === bays - 1) {
         elements.push({ 
           id: `Brace_Col_L_${b}`, startNode: `N_base_L_${b}`, endNode: `N_eaves_L_${b+1}`, 
-          ...braceProps, groupId: "bracings" 
+          ...braceProps, iy: braceProps.iy * 1e-8, iz: braceProps.iz * 1e-8, area: braceProps.area * 1e-4, wy: braceProps.wy * 1e-6, wz: braceProps.wz * 1e-6, groupId: "bracings" 
         });
         elements.push({ 
           id: `Brace_Col_R_${b}`, startNode: `N_base_R_${b}`, endNode: `N_eaves_R_${b+1}`, 
-          ...braceProps, groupId: "bracings" 
+          ...braceProps, iy: braceProps.iy * 1e-8, iz: braceProps.iz * 1e-8, area: braceProps.area * 1e-4, wy: braceProps.wy * 1e-6, wz: braceProps.wz * 1e-6, groupId: "bracings" 
         });
       }
     }
@@ -677,7 +677,7 @@ export default function App() {
       const currentParametric = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D, loadValue);
       setFreeModel3D(currentParametric);
     }
-  }, [workMode3D, freeModel3D, width3D, height3D, slope3D, length3D, bays3D, loadValue, generateParametricModel3D]);
+  }, [workMode3D, freeModel3D]);
 
   // Reactive MES 3D solver runs automatically when model updates
   useEffect(() => {
@@ -744,11 +744,11 @@ export default function App() {
         el.id === elementId ? {
           ...el,
           sectionId,
-          iy: props.iy,
-          iz: props.iz,
-          area: props.area,
-          wy: props.wy,
-          wz: props.wz
+          iy: props.iy * 1e-8,
+          iz: props.iz * 1e-8,
+          area: props.area * 1e-4,
+          wy: props.wy * 1e-6,
+          wz: props.wz * 1e-6
         } : el
       );
       return {
@@ -786,13 +786,18 @@ export default function App() {
       if (exists) return prev;
 
       const newId = `Beam_${Date.now()}`;
-      const defaultProps = STEEL_PROFILES_3D[rafterSection] || STEEL_PROFILES_3D['IPE220'];
+      const defaultProps = STEEL_PROFILES_3D['IPE200'] || STEEL_PROFILES_3D['IPE220'];
       const newElement = {
         id: newId,
         startNode: startNodeId,
         endNode: endNodeId,
         ...defaultProps,
-        sectionId: rafterSection,
+        iy: defaultProps.iy * 1e-8,
+        iz: defaultProps.iz * 1e-8,
+        area: defaultProps.area * 1e-4,
+        wy: defaultProps.wy * 1e-6,
+        wz: defaultProps.wz * 1e-6,
+        sectionId: 'IPE200',
         groupId: "rafters"
       };
 
@@ -1826,6 +1831,27 @@ export default function App() {
                   ✏️ Edytor Wolny CAD
                 </button>
               </div>
+
+              {workMode3D === 'free_cad' && (
+                <div style={{ padding: '0 15px', marginBottom: '10px' }}>
+                  <button
+                    onClick={() => setFreeModel3D(null)}
+                    style={{
+                      width: '100%',
+                      padding: '8px',
+                      background: 'rgba(239, 68, 68, 0.1)',
+                      border: '1px solid rgba(239, 68, 68, 0.3)',
+                      color: '#ef4444',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontWeight: 'bold',
+                      fontSize: '12px',
+                    }}
+                  >
+                    🔄 Resetuj układ do Kreatora
+                  </button>
+                </div>
+              )}
 
               {workMode3D === 'parametric' ? (
                 <>
