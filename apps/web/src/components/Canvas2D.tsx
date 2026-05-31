@@ -14,7 +14,7 @@ export interface ResultPoint {
 export interface Support {
   id: string;
   x: number;
-  type: 'Pinned' | 'Fixed';
+  type: 'Pinned' | 'Roller' | 'Fixed';
 }
 
 export interface PointLoad {
@@ -150,6 +150,34 @@ function drawPinnedSupport(ctx: CanvasRenderingContext2D, x: number, y: number, 
     ctx.beginPath();
     ctx.moveTo(hx, baseY + 3);
     ctx.lineTo(hx - 4, baseY + 9);
+    ctx.stroke();
+  }
+}
+
+function drawRollerSupport(ctx: CanvasRenderingContext2D, x: number, y: number, size: number = 20) {
+  // Circle
+  ctx.strokeStyle = COLORS.support;
+  ctx.fillStyle = COLORS.supportFill;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(x, y + size / 2, size / 2, 0, 2 * Math.PI);
+  ctx.fill();
+  ctx.stroke();
+
+  // Base plate
+  ctx.strokeStyle = COLORS.support;
+  ctx.lineWidth = 1;
+  const baseY = y + size + 2;
+  ctx.beginPath();
+  ctx.moveTo(x - size * 0.8, baseY);
+  ctx.lineTo(x + size * 0.8, baseY);
+  ctx.stroke();
+  // Hatches
+  for (let i = -3; i <= 3; i++) {
+    const hx = x + i * (size * 0.2);
+    ctx.beginPath();
+    ctx.moveTo(hx, baseY);
+    ctx.lineTo(hx - 4, baseY + 6);
     ctx.stroke();
   }
 }
@@ -318,7 +346,7 @@ export default function Canvas2D({
   const supportsToUse: Support[] = supports ?? (model?.nodes ? model.nodes.map((n: any) => ({
     id: n.id,
     x: n.x,
-    type: (n.support_type === 'Pinned' || n.support_type === 'Fixed') ? (n.support_type as 'Pinned' | 'Fixed') : 'Pinned',
+    type: (n.support_type === 'Pinned' || n.support_type === 'Roller' || n.support_type === 'Fixed') ? (n.support_type as 'Pinned' | 'Roller' | 'Fixed') : 'Pinned',
   })) : []);
   const pointLoadsToUse: PointLoad[] = pointLoads ?? (model?.point_loads ? model.point_loads.map((pl: any, idx: number) => ({
     id: `PL_${idx}`,
@@ -484,6 +512,49 @@ export default function Canvas2D({
     const beamLength = model?.geometry?.length || beamLengthToUse || 5.0;
     const load = loadToUse;
 
+    // ======== Sketch Mode Visual Separation ========
+    if (activeTool === 'draw_beam') {
+      ctx.fillStyle = '#020617'; // Ciemne tło
+      ctx.fillRect(0, 0, w, h);
+
+      // Siatka inżynierska
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 0.5;
+      const gridSize = 20;
+      for (let x = 0; x < w; x += gridSize) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      }
+      for (let y = 0; y < h; y += gridSize) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      }
+
+      ctx.fillStyle = '#3b82f6';
+      ctx.font = 'bold 22px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('✏️ TRYB PROJEKTOWY: SZKICOWANIE BELKI', w / 2, h / 2 - 20);
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Narysuj odręcznie poziomą linię, aby wygenerować nową belkę.', w / 2, h / 2 + 10);
+      
+      // Narysuj aktualnie tworzony ślad szkicu
+      if (currentStroke.length > 1) {
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.shadowColor = '#3b82f6';
+        ctx.shadowBlur = 12;
+        ctx.beginPath();
+        ctx.moveTo(currentStroke[0].x, currentStroke[0].y);
+        for (let i = 1; i < currentStroke.length; i++) {
+          ctx.lineTo(currentStroke[i].x, currentStroke[i].y);
+        }
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+      return; // Wyjdź z funkcji 'draw' za pomocą 'return'
+    }
+
     // Minor/major background grid
     drawGrid(ctx, w, h);
 
@@ -534,6 +605,8 @@ export default function Canvas2D({
         } else {
           drawFixedSupportIntermediate(ctx, px, beamY + beamThick / 2, 20);
         }
+      } else if (s.type === 'Roller') {
+        drawRollerSupport(ctx, px, beamY + beamThick / 2, 20);
       } else {
         // Pinned Support
         drawPinnedSupport(ctx, px, beamY + beamThick / 2, 20);
@@ -697,39 +770,7 @@ export default function Canvas2D({
       );
     }
 
-    // ======== Sketch Mode Visual Separation ========
-    if (activeTool === 'draw_beam') {
-      ctx.fillStyle = 'rgba(2, 6, 23, 0.85)'; // slate-950 z opacity 85%
-      ctx.fillRect(0, 0, w, h);
-
-      ctx.fillStyle = '#3b82f6';
-      ctx.font = 'bold 22px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('✏️ TRYB SZKICOWANIA', w / 2, h / 2 - 20);
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '14px sans-serif';
-      ctx.fillText('Narysuj poziomą linię, aby wygenerować nowy, czysty układ.', w / 2, h / 2 + 10);
-    }
-
-    // ======== Draw Active Sketch Stroke (Faza 4) ========
-    if (currentStroke.length > 1) {
-      ctx.strokeStyle = 'rgba(59, 130, 246, 0.75)'; // premium semi-transparent neon blue
-      ctx.lineWidth = 4;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.shadowColor = '#3b82f6';
-      ctx.shadowBlur = 8;
-
-      ctx.beginPath();
-      ctx.moveTo(currentStroke[0].x, currentStroke[0].y);
-      for (let i = 1; i < currentStroke.length; i++) {
-        ctx.lineTo(currentStroke[i].x, currentStroke[i].y);
-      }
-      ctx.stroke();
-
-      // Reset shadow
-      ctx.shadowBlur = 0;
-    }
+    // Removed Faza 4 Sketch Mode code from here since it's handled at the start
   }, [results, supports, pointLoads, beamLength, load, activeTool, currentStroke, model, toastMessage]);
 
   useEffect(() => {

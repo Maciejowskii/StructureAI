@@ -130,10 +130,10 @@ function mockSolver(inputModel: any): any {
 interface Support {
   id: string;
   x: number;
-  type: 'Pinned' | 'Fixed';
+  type: 'Pinned' | 'Roller' | 'Fixed';
 }
 
-export type ToolMode = 'select' | 'draw_beam' | 'add_point_load' | 'add_support_pinned' | 'add_support_fixed';
+export type ToolMode = 'select' | 'draw_beam' | 'add_point_load' | 'add_support_pinned' | 'add_support_roller' | 'add_support_fixed';
 
 // =============================================================================
 // App Component
@@ -198,7 +198,7 @@ export default function App() {
     });
   }, [beamLength]);
 
-  const addSupport = (x: number = beamLength / 2, type: 'Pinned' | 'Fixed' = 'Pinned') => {
+  const addSupport = (x: number = beamLength / 2, type: 'Pinned' | 'Roller' | 'Fixed' = 'Roller') => {
     if (supports.length >= 10) return;
     const clampedX = Math.min(Math.max(x, 0), beamLength);
     setSupports(prev => {
@@ -224,7 +224,7 @@ export default function App() {
     });
   };
 
-  const updateSupportType = (id: string, type: 'Pinned' | 'Fixed') => {
+  const updateSupportType = (id: string, type: 'Pinned' | 'Roller' | 'Fixed') => {
     setSupports(prev => {
       return prev.map(s => (s.id === id ? { ...s, type } : s));
     });
@@ -512,6 +512,9 @@ export default function App() {
     if (activeTool === 'add_support_pinned') {
       addSupport(roundedX, 'Pinned');
       setActiveTool('select');
+    } else if (activeTool === 'add_support_roller') {
+      addSupport(roundedX, 'Roller');
+      setActiveTool('select');
     } else if (activeTool === 'add_support_fixed') {
       addSupport(roundedX, 'Fixed');
       setActiveTool('select');
@@ -525,7 +528,7 @@ export default function App() {
   const nodesForModel = sortedSupportsForModel.map((s, idx) => ({
     id: `N${idx}`,
     x: s.x,
-    support_type: s.type,
+    support_type: s.type === 'Roller' ? 'Pinned' : s.type, // Map Roller to Pinned for the solver
   }));
   const elementsForModel = [];
   let EForModel = 210e9;
@@ -619,12 +622,20 @@ export default function App() {
             △
           </button>
           <button 
-            className={`toolbar__btn ${activeTool === 'add_support_fixed' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip="Dodaj utwierdzenie" 
-            onClick={() => setActiveTool('add_support_fixed')}
+            className={`toolbar__btn ${activeTool === 'add_support_roller' ? 'toolbar__btn--active' : ''}`} 
+            data-tooltip="Dodaj podporę przesuwną" 
+            onClick={() => setActiveTool('add_support_roller')}
             id="tool-roller"
           >
             ○
+          </button>
+          <button 
+            className={`toolbar__btn ${activeTool === 'add_support_fixed' ? 'toolbar__btn--active' : ''}`} 
+            data-tooltip="Dodaj utwierdzenie" 
+            onClick={() => setActiveTool('add_support_fixed')}
+            id="tool-fixed"
+          >
+            ◫
           </button>
           <div className="toolbar__separator" />
           <button 
@@ -796,6 +807,20 @@ export default function App() {
                       
                       <div style={{ display: 'flex', gap: '4px', flex: isEdge ? 1 : 'unset', justifyContent: isEdge ? 'flex-end' : 'flex-start' }}>
                         <button
+                          onClick={() => updateSupportType(s.id, 'Roller')}
+                          style={{
+                            padding: '2px 8px',
+                            fontSize: '11px',
+                            borderRadius: '4px',
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            background: s.type === 'Roller' ? '#2563eb' : 'rgba(0,0,0,0.3)',
+                            color: '#fff',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          Przesuwna
+                        </button>
+                        <button
                           onClick={() => updateSupportType(s.id, 'Pinned')}
                           style={{
                             padding: '2px 8px',
@@ -807,7 +832,7 @@ export default function App() {
                             cursor: 'pointer'
                           }}
                         >
-                          Przegub
+                          Stała
                         </button>
                         <button
                           onClick={() => updateSupportType(s.id, 'Fixed')}
@@ -912,7 +937,7 @@ export default function App() {
             <label className="param-label" htmlFor="param-load">
               Obciążenie ciągłe [kN/m]
             </label>
-            <div className="param-input-group">
+            <div className="param-input-group" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
               <input
                 id="param-load"
                 type="range"
@@ -922,6 +947,16 @@ export default function App() {
                 value={loadValue}
                 onChange={(e) => setLoadValue(parseFloat(e.target.value))}
                 className="param-range"
+                style={{ flex: 1 }}
+              />
+              <input 
+                type="number"
+                min="1"
+                max="1000"
+                step="1"
+                value={loadValue}
+                onChange={(e) => setLoadValue(parseFloat(e.target.value) || 0)}
+                style={{ width: '60px', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', padding: '2px 4px', textAlign: 'center' }}
               />
               <span className="param-value mono-value">{loadValue.toFixed(1)}</span>
             </div>
