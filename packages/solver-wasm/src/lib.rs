@@ -163,15 +163,403 @@ pub fn solve_mesh(input_val: JsValue) -> JsValue {
     serde_wasm_bindgen::to_value(&result).unwrap_or_default()
 }
 
-#[wasm_bindgen]
-pub fn solve_mesh_3d(_input_val: JsValue) -> JsValue {
-    // 3D 6-DOF structural analysis solver entry point
-    let err_output = SolverOutput {
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct Node3D {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub support_type: String, // "Free", "Fixed", "Pinned"
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct Element3D {
+    pub id: String,
+    pub start_node_id: String,
+    pub end_node_id: String,
+    pub e: f64,
+    pub g: f64, // Shear modulus
+    pub area: f64,
+    pub iy: f64, // Moment of inertia about local Y
+    pub iz: f64, // Moment of inertia about local Z
+    pub j: f64,  // Torsional constant
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct Load3D {
+    pub node_id: String,
+    pub fx: f64,
+    pub fy: f64,
+    pub fz: f64,
+    pub mx: f64,
+    pub my: f64,
+    pub mz: f64,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct InputModel3D {
+    pub nodes: Vec<Node3D>,
+    pub elements: Vec<Element3D>,
+    pub loads: Vec<Load3D>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ResultNode3D {
+    pub id: String,
+    pub ux: f64,
+    pub uy: f64,
+    pub uz: f64,
+    pub rx: f64,
+    pub ry: f64,
+    pub rz: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ResultElement3D {
+    pub id: String,
+    pub fx_start: f64,
+    pub fy_start: f64,
+    pub fz_start: f64,
+    pub mx_start: f64,
+    pub my_start: f64,
+    pub mz_start: f64,
+    pub fx_end: f64,
+    pub fy_end: f64,
+    pub fz_end: f64,
+    pub mx_end: f64,
+    pub my_end: f64,
+    pub mz_end: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SolverOutput3D {
+    pub success: bool,
+    pub error: Option<String>,
+    pub nodes: Vec<ResultNode3D>,
+    pub elements: Vec<ResultElement3D>,
+}
+
+pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
+    let n_nodes = input_model.nodes.len();
+    if n_nodes < 2 {
+        return SolverOutput3D {
+            success: false,
+            error: Some("The 3D model must have at least 2 nodes".to_string()),
+            nodes: vec![],
+            elements: vec![],
+        };
+    }
+
+    let system_size = n_nodes * 6;
+    let mut k_global = DMatrix::<f64>::zeros(system_size, system_size);
+    let mut f_global = DVector::<f64>::zeros(system_size);
+
+    // Apply nodal loads
+    for load in &input_model.loads {
+        if let Some(idx) = input_model.nodes.iter().position(|n| n.id == load.node_id) {
+            f_global[idx * 6 + 0] += load.fx;
+            f_global[idx * 6 + 1] += load.fy;
+            f_global[idx * 6 + 2] += load.fz;
+            f_global[idx * 6 + 3] += load.mx;
+            f_global[idx * 6 + 4] += load.my;
+            f_global[idx * 6 + 5] += load.mz;
+        }
+    }
+
+    // Element assembly
+    for el in &input_model.elements {
+        let start_idx = match input_model.nodes.iter().position(|n| n.id == el.start_node_id) {
+            Some(idx) => idx,
+            None => continue,
+        };
+        let end_idx = match input_model.nodes.iter().position(|n| n.id == el.end_node_id) {
+            Some(idx) => idx,
+            None => continue,
+        };
+
+        let n1 = &input_model.nodes[start_idx];
+        let n2 = &input_model.nodes[end_idx];
+
+        let dx = n2.x - n1.x;
+        let dy = n2.y - n1.y;
+        let dz = n2.z - n1.z;
+        let l = (dx * dx + dy * dy + dz * dz).sqrt();
+
+        if l < 1e-9 {
+            continue;
+        }
+
+        // Calculate rotation matrix R (3x3)
+        let mut r = nalgebra::Matrix3::<f64>::zeros();
+        let vx_x = dx / l;
+        let vx_y = dy / l;
+        let vx_z = dz / l;
+
+        // If member is vertical
+        if (vx_x.abs() < 1e-5) && (vx_z.abs() < 1e-5) {
+            let sign = if vx_y > 0.0 { 1.0 } else { -1.0 };
+            r[(0, 1)] = sign;
+            r[(1, 0)] = -sign;
+            r[(2, 2)] = 1.0;
+        } else {
+            let cx = vx_x;
+            let cy = vx_y;
+            let cz = vx_z;
+            let d_xz = (cx * cx + cz * cz).sqrt();
+
+            r[(0, 0)] = cx;
+            r[(0, 1)] = cy;
+            r[(0, 2)] = cz;
+
+            r[(1, 0)] = -cx * cy / d_xz;
+            r[(1, 1)] = d_xz;
+            r[(1, 2)] = -cy * cz / d_xz;
+
+            r[(2, 0)] = -cz / d_xz;
+            r[(2, 1)] = 0.0;
+            r[(2, 2)] = cx / d_xz;
+        }
+
+        // Local 12x12 stiffness matrix
+        let mut k_local = DMatrix::<f64>::zeros(12, 12);
+        let e = el.e;
+        let g = el.g;
+        let area = el.area;
+        let iy = el.iy;
+        let iz = el.iz;
+        let j = el.j;
+
+        let l2 = l * l;
+        let l3 = l2 * l;
+
+        // Axial
+        let axial = e * area / l;
+        k_local[(0, 0)] = axial;
+        k_local[(0, 6)] = -axial;
+        k_local[(6, 0)] = -axial;
+        k_local[(6, 6)] = axial;
+
+        // Torsion
+        let torsion = g * j / l;
+        k_local[(3, 3)] = torsion;
+        k_local[(3, 9)] = -torsion;
+        k_local[(9, 3)] = -torsion;
+        k_local[(9, 9)] = torsion;
+
+        // Z-bending (in local XY plane)
+        let b_z_12 = 12.0 * e * iz / l3;
+        let b_z_6 = 6.0 * e * iz / l2;
+        let b_z_4 = 4.0 * e * iz / l;
+        let b_z_2 = 2.0 * e * iz / l;
+
+        k_local[(1, 1)] = b_z_12;  k_local[(1, 5)] = b_z_6;   k_local[(1, 7)] = -b_z_12; k_local[(1, 11)] = b_z_6;
+        k_local[(5, 1)] = b_z_6;   k_local[(5, 5)] = b_z_4;   k_local[(5, 7)] = -b_z_6;  k_local[(5, 11)] = b_z_2;
+        k_local[(7, 1)] = -b_z_12; k_local[(7, 5)] = -b_z_6;  k_local[(7, 7)] = b_z_12;  k_local[(7, 11)] = -b_z_6;
+        k_local[(11, 1)] = b_z_6;  k_local[(11, 5)] = b_z_2;  k_local[(11, 7)] = -b_z_6; k_local[(11, 11)] = b_z_4;
+
+        // Y-bending (in local XZ plane)
+        let b_y_12 = 12.0 * e * iy / l3;
+        let b_y_6 = 6.0 * e * iy / l2;
+        let b_y_4 = 4.0 * e * iy / l;
+        let b_y_2 = 2.0 * e * iy / l;
+
+        k_local[(2, 2)] = b_y_12;   k_local[(2, 4)] = -b_y_6;  k_local[(2, 8)] = -b_y_12;  k_local[(2, 10)] = -b_y_6;
+        k_local[(4, 2)] = -b_y_6;   k_local[(4, 4)] = b_y_4;   k_local[(4, 8)] = b_y_6;    k_local[(4, 10)] = b_y_2;
+        k_local[(8, 2)] = -b_y_12;  k_local[(8, 4)] = b_y_6;   k_local[(8, 8)] = b_y_12;   k_local[(8, 10)] = b_y_6;
+        k_local[(10, 2)] = -b_y_6;  k_local[(10, 4)] = b_y_2;  k_local[(10, 8)] = b_y_6;   k_local[(10, 10)] = b_y_4;
+
+        // Global transformation matrix T (12x12)
+        let mut t = DMatrix::<f64>::zeros(12, 12);
+        for i in 0..4 {
+            t.fixed_view_mut::<3, 3>(i * 3, i * 3).copy_from(&r);
+        }
+
+        let k_global_el = t.transpose() * k_local * t;
+
+        // Assemble into global matrix
+        let dof_map = [
+            start_idx * 6 + 0, start_idx * 6 + 1, start_idx * 6 + 2, start_idx * 6 + 3, start_idx * 6 + 4, start_idx * 6 + 5,
+            end_idx * 6 + 0, end_idx * 6 + 1, end_idx * 6 + 2, end_idx * 6 + 3, end_idx * 6 + 4, end_idx * 6 + 5,
+        ];
+
+        for r_i in 0..12 {
+            for c_i in 0..12 {
+                k_global[(dof_map[r_i], dof_map[c_i])] += k_global_el[(r_i, c_i)];
+            }
+        }
+    }
+
+    // Boundary conditions
+    let penalty = 1e12;
+    for (idx, node) in input_model.nodes.iter().enumerate() {
+        if node.support_type == "Fixed" {
+            for d in 0..6 {
+                k_global[(idx * 6 + d, idx * 6 + d)] += penalty;
+            }
+        } else if node.support_type == "Pinned" {
+            // Block vertical/horizontal displacements but allow rotations
+            for d in 0..3 {
+                k_global[(idx * 6 + d, idx * 6 + d)] += penalty;
+            }
+        }
+    }
+
+    // Solve system K * U = F
+    let u_solved = match k_global.lu().solve(&f_global) {
+        Some(u) => u,
+        None => {
+            return SolverOutput3D {
+                success: false,
+                error: Some("Global 3D Stiffness Matrix is singular".to_string()),
+                nodes: vec![],
+                elements: vec![],
+            };
+        }
+    };
+
+    let mut result_nodes = Vec::new();
+    for (idx, node) in input_model.nodes.iter().enumerate() {
+        result_nodes.push(ResultNode3D {
+            id: node.id.clone(),
+            ux: u_solved[idx * 6 + 0] * 1000.0, // convert to mm
+            uy: u_solved[idx * 6 + 1] * 1000.0, // convert to mm
+            uz: u_solved[idx * 6 + 2] * 1000.0, // convert to mm
+            rx: u_solved[idx * 6 + 3],
+            ry: u_solved[idx * 6 + 4],
+            rz: u_solved[idx * 6 + 5],
+        });
+    }
+
+    // Element internal forces at ends
+    let mut result_elements = Vec::new();
+    for el in &input_model.elements {
+        let start_idx = input_model.nodes.iter().position(|n| n.id == el.start_node_id).unwrap();
+        let end_idx = input_model.nodes.iter().position(|n| n.id == el.end_node_id).unwrap();
+
+        let n1 = &input_model.nodes[start_idx];
+        let n2 = &input_model.nodes[end_idx];
+
+        let dx = n2.x - n1.x;
+        let dy = n2.y - n1.y;
+        let dz = n2.z - n1.z;
+        let l = (dx * dx + dy * dy + dz * dz).sqrt();
+
+        // Calculate rotation matrix R
+        let mut r = nalgebra::Matrix3::<f64>::zeros();
+        let vx_x = dx / l;
+        let vx_y = dy / l;
+        let vx_z = dz / l;
+
+        if (vx_x.abs() < 1e-5) && (vx_z.abs() < 1e-5) {
+            let sign = if vx_y > 0.0 { 1.0 } else { -1.0 };
+            r[(0, 1)] = sign;
+            r[(1, 0)] = -sign;
+            r[(2, 2)] = 1.0;
+        } else {
+            let cx = vx_x;
+            let cy = vx_y;
+            let cz = vx_z;
+            let d_xz = (cx * cx + cz * cz).sqrt();
+
+            r[(0, 0)] = cx;
+            r[(0, 1)] = cy;
+            r[(0, 2)] = cz;
+
+            r[(1, 0)] = -cx * cy / d_xz;
+            r[(1, 1)] = d_xz;
+            r[(1, 2)] = -cy * cz / d_xz;
+
+            r[(2, 0)] = -cz / d_xz;
+            r[(2, 1)] = 0.0;
+            r[(2, 2)] = cx / d_xz;
+        }
+
+        // Local displacement vector u_local_el
+        let mut u_global_el = DVector::<f64>::zeros(12);
+        for d in 0..6 {
+            u_global_el[d] = u_solved[start_idx * 6 + d];
+            u_global_el[6 + d] = u_solved[end_idx * 6 + d];
+        }
+
+        let mut t = DMatrix::<f64>::zeros(12, 12);
+        for i in 0..4 {
+            t.fixed_view_mut::<3, 3>(i * 3, i * 3).copy_from(&r);
+        }
+
+        let u_local_el = &t * &u_global_el;
+
+        // Reconstruct local stiffness
+        let mut k_local = DMatrix::<f64>::zeros(12, 12);
+        let e = el.e;
+        let g = el.g;
+        let area = el.area;
+        let iy = el.iy;
+        let iz = el.iz;
+        let j = el.j;
+        let l2 = l * l;
+        let l3 = l2 * l;
+
+        let axial = e * area / l;
+        k_local[(0, 0)] = axial; k_local[(0, 6)] = -axial; k_local[(6, 0)] = -axial; k_local[(6, 6)] = axial;
+        let torsion = g * j / l;
+        k_local[(3, 3)] = torsion; k_local[(3, 9)] = -torsion; k_local[(9, 3)] = -torsion; k_local[(9, 9)] = torsion;
+
+        let b_z_12 = 12.0 * e * iz / l3; let b_z_6 = 6.0 * e * iz / l2; let b_z_4 = 4.0 * e * iz / l; let b_z_2 = 2.0 * e * iz / l;
+        k_local[(1, 1)] = b_z_12;  k_local[(1, 5)] = b_z_6;   k_local[(1, 7)] = -b_z_12; k_local[(1, 11)] = b_z_6;
+        k_local[(5, 1)] = b_z_6;   k_local[(5, 5)] = b_z_4;   k_local[(5, 7)] = -b_z_6;  k_local[(5, 11)] = b_z_2;
+        k_local[(7, 1)] = -b_z_12; k_local[(7, 5)] = -b_z_6;  k_local[(7, 7)] = b_z_12;  k_local[(7, 11)] = -b_z_6;
+        k_local[(11, 1)] = b_z_6;  k_local[(11, 5)] = b_z_2;  k_local[(11, 7)] = -b_z_6; k_local[(11, 11)] = b_z_4;
+
+        let b_y_12 = 12.0 * e * iy / l3; let b_y_6 = 6.0 * e * iy / l2; let b_y_4 = 4.0 * e * iy / l; let b_y_2 = 2.0 * e * iy / l;
+        k_local[(2, 2)] = b_y_12;   k_local[(2, 4)] = -b_y_6;  k_local[(2, 8)] = -b_y_12;  k_local[(2, 10)] = -b_y_6;
+        k_local[(4, 2)] = -b_y_6;   k_local[(4, 4)] = b_y_4;   k_local[(4, 8)] = b_y_6;    k_local[(4, 10)] = b_y_2;
+        k_local[(8, 2)] = -b_y_12;  k_local[(8, 4)] = b_y_6;   k_local[(8, 8)] = b_y_12;   k_local[(8, 10)] = b_y_6;
+        k_local[(10, 2)] = -b_y_6;  k_local[(10, 4)] = b_y_2;  k_local[(10, 8)] = b_y_6;   k_local[(10, 10)] = b_y_4;
+
+        let f_local_el = &k_local * &u_local_el;
+
+        result_elements.push(ResultElement3D {
+            id: el.id.clone(),
+            fx_start: f_local_el[0] / 1000.0, // convert N to kN
+            fy_start: f_local_el[1] / 1000.0,
+            fz_start: f_local_el[2] / 1000.0,
+            mx_start: f_local_el[3] / 1000.0, // convert Nm to kNm
+            my_start: f_local_el[4] / 1000.0,
+            mz_start: f_local_el[5] / 1000.0,
+            fx_end: f_local_el[6] / 1000.0,
+            fy_end: f_local_el[7] / 1000.0,
+            fz_end: f_local_el[8] / 1000.0,
+            mx_end: f_local_el[9] / 1000.0,
+            my_end: f_local_el[10] / 1000.0,
+            mz_end: f_local_el[11] / 1000.0,
+        });
+    }
+
+    SolverOutput3D {
         success: true,
         error: None,
-        results: vec![],
+        nodes: result_nodes,
+        elements: result_elements,
+    }
+}
+
+#[wasm_bindgen]
+pub fn solve_mesh_3d(input_val: JsValue) -> JsValue {
+    let input_model: InputModel3D = match serde_wasm_bindgen::from_value(input_val) {
+        Ok(m) => m,
+        Err(e) => {
+            let err_output = SolverOutput3D {
+                success: false,
+                error: Some(format!("Failed to parse 3D input model from JS: {}", e)),
+                nodes: vec![],
+                elements: vec![],
+            };
+            return serde_wasm_bindgen::to_value(&err_output).unwrap();
+        }
     };
-    serde_wasm_bindgen::to_value(&err_output).unwrap_or_default()
+
+    let result = solve_mesh_3d_internal(&input_model);
+    serde_wasm_bindgen::to_value(&result).unwrap_or_default()
 }
 
 #[wasm_bindgen]

@@ -10,6 +10,7 @@ import { generateSteelReport, generateConcreteReport } from './utils/latexGenera
 
 type SolveFn = (input: any) => any;
 let solveMeshFn: SolveFn | null = null;
+let solveMesh3dFn: SolveFn | null = null;
 let optimizeSectionsFn: SolveFn | null = null;
 let designRcSectionFn: ((m_ed_k_nm: number, profile_val: any) => any) | null = null;
 
@@ -18,6 +19,7 @@ async function initWasm(): Promise<boolean> {
     const wasmModule = await import('solver-wasm');
     await wasmModule.default();
     solveMeshFn = wasmModule.solve_mesh;
+    solveMesh3dFn = wasmModule.solve_mesh_3d;
     optimizeSectionsFn = wasmModule.optimize_sections;
     designRcSectionFn = wasmModule.design_rc_section;
     return true;
@@ -167,6 +169,14 @@ export default function App() {
   const [rcConcreteClass, setRcConcreteClass] = useState<'C20/25' | 'C25/30' | 'C30/37'>('C25/30');
   const [rcSteelGrade, setRcSteelGrade] = useState<number>(500); // MPa
   const [rcResult, setRcResult] = useState<any | null>(null);
+
+  // 3D Parametric Generator States
+  const [width3D, setWidth3D] = useState(6.0); // B (m)
+  const [height3D, setHeight3D] = useState(4.0); // H (m)
+  const [slope3D, setSlope3D] = useState(15.0); // alpha (deg)
+  const [length3D, setLength3D] = useState(6.0); // L (m)
+  const [bays3D, setBays3D] = useState(2); // n_bays
+  const [results3D, setResults3D] = useState<any | null>(null);
 
   // Initialize WASM
   useEffect(() => {
@@ -427,6 +437,141 @@ export default function App() {
     if (wasmReady) solve();
   }, [wasmReady, solve]);
 
+  const generatePortalFrame3D = useCallback((B: number, H: number, alpha: number, L: number, n_bays: number) => {
+    const nodes: any[] = [];
+    const elements: any[] = [];
+    const loads: any[] = [];
+
+    const bay_length = L / n_bays;
+    const alpha_rad = (alpha * Math.PI) / 180;
+    const H_ridge = H + Math.tan(alpha_rad) * (B / 2);
+
+    // Generate nodes
+    for (let b = 0; b <= n_bays; b++) {
+      const z = b * bay_length;
+      // Left column base
+      nodes.push({ id: `N_base_L_${b}`, x: -B/2, y: 0, z, support_type: 'Fixed' });
+      // Right column base
+      nodes.push({ id: `N_base_R_${b}`, x: B/2, y: 0, z, support_type: 'Fixed' });
+      // Left column top (eaves)
+      nodes.push({ id: `N_eaves_L_${b}`, x: -B/2, y: H, z, support_type: 'Free' });
+      // Right column top (eaves)
+      nodes.push({ id: `N_eaves_R_${b}`, x: B/2, y: H, z, support_type: 'Free' });
+      // Ridge node (roof top center)
+      nodes.push({ id: `N_ridge_${b}`, x: 0, y: H_ridge, z, support_type: 'Free' });
+    }
+
+    // Standard IPE200 properties for portal frame members:
+    // E = 210 GPa, G = 80 GPa, A = 28.5 cm2 = 2.85e-3 m2
+    // Iy = 1943 cm4 = 1.943e-5 m4 (major axis iz in 3D), Iz = 142 cm4 = 1.42e-6 m4 (minor axis iy in 3D)
+    // J = 7 cm4 = 7e-8 m4
+    const E = 210e9;
+    const G = 80e9;
+    const area = 2.85e-3;
+    const iz = 1.943e-5;
+    const iy = 1.42e-6;
+    const j = 7e-8;
+
+    for (let b = 0; b <= n_bays; b++) {
+      // Columns
+      elements.push({ id: `Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b}`, e: E, g: G, area, iy, iz, j });
+      elements.push({ id: `Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b}`, e: E, g: G, area, iy, iz, j });
+      
+      // Rafters
+      elements.push({ id: `Raf_L_${b}`, start_node_id: `N_eaves_L_${b}`, end_node_id: `N_ridge_${b}`, e: E, g: G, area, iy, iz, j });
+      elements.push({ id: `Raf_R_${b}`, start_node_id: `N_ridge_${b}`, end_node_id: `N_eaves_R_${b}`, e: E, g: G, area, iy, iz, j });
+    }
+
+    // Longitudinal elements (purlins and girts connecting bays)
+    for (let b = 0; b < n_bays; b++) {
+      // Eaves girts
+      elements.push({ id: `Girt_L_${b}`, start_node_id: `N_eaves_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, e: E, g: G, area: area * 0.5, iy: iy * 0.5, iz: iz * 0.5, j: j * 0.5 });
+      elements.push({ id: `Girt_R_${b}`, start_node_id: `N_eaves_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, e: E, g: G, area: area * 0.5, iy: iy * 0.5, iz: iz * 0.5, j: j * 0.5 });
+      
+      // Ridge purlins
+      elements.push({ id: `Purlin_R_${b}`, start_node_id: `N_ridge_${b}`, end_node_id: `N_ridge_${b+1}`, e: E, g: G, area: area * 0.5, iy: iy * 0.5, iz: iz * 0.5, j: j * 0.5 });
+
+      // X-bracing in the first and last bays (diagonal members)
+      if (b === 0 || b === n_bays - 1) {
+        elements.push({ id: `Brace_Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, e: E, g: G, area: area * 0.2, iy: iy * 0.1, iz: iz * 0.1, j: j * 0.1 });
+        elements.push({ id: `Brace_Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, e: E, g: G, area: area * 0.2, iy: iy * 0.1, iz: iz * 0.1, j: j * 0.1 });
+      }
+    }
+
+    // Apply some sample loads
+    for (let b = 0; b <= n_bays; b++) {
+      loads.push({
+        node_id: `N_ridge_${b}`,
+        fx: 0.0,
+        fy: -25000.0, // -25 kN downward
+        fz: 0.0,
+        mx: 0.0,
+        my: 0.0,
+        mz: 0.0,
+      });
+      loads.push({
+        node_id: `N_eaves_L_${b}`,
+        fx: 12000.0, // 12 kN lateral wind
+        fy: 0.0,
+        fz: 0.0,
+        mx: 0.0,
+        my: 0.0,
+        mz: 0.0,
+      });
+    }
+
+    return { nodes, elements, loads };
+  }, []);
+
+  const solve3D = useCallback(() => {
+    const inputModel3D = generatePortalFrame3D(width3D, height3D, slope3D, length3D, bays3D);
+    if (solveMesh3dFn) {
+      const startTime = performance.now();
+      const output = solveMesh3dFn(inputModel3D);
+      const endTime = performance.now();
+      if (output && output.success) {
+        setResults3D({ ...output, model: inputModel3D });
+        setSolveTimeMs(endTime - startTime);
+      } else {
+        console.error('[StructurAI] 3D Solver error:', output?.error);
+      }
+    } else {
+      const mockResultNodes = inputModel3D.nodes.map(n => {
+        const isRidge = n.id.includes('ridge');
+        const isEaves = n.id.includes('eaves');
+        return {
+          id: n.id,
+          ux: isEaves ? 12.5 : 0.0,
+          uy: isRidge ? -18.2 : isEaves ? -8.4 : 0.0,
+          uz: 0.0,
+          rx: 0.0,
+          ry: 0.0,
+          rz: 0.0,
+        };
+      });
+      const mockResultElements = inputModel3D.elements.map(el => {
+        return {
+          id: el.id,
+          fx_start: 0, fy_start: 0, fz_start: 0, mx_start: 0, my_start: 0, mz_start: el.id.includes('Col') ? -15.4 : -32.5,
+          fx_end: 0, fy_end: 0, fz_end: 0, mx_end: 0, my_end: 0, mz_end: el.id.includes('Col') ? 32.5 : 15.4,
+        };
+      });
+      setResults3D({
+        success: true,
+        error: null,
+        nodes: mockResultNodes,
+        elements: mockResultElements,
+        model: inputModel3D,
+      });
+    }
+  }, [width3D, height3D, slope3D, length3D, bays3D, generatePortalFrame3D]);
+
+  useEffect(() => {
+    if (appMode === '3d') {
+      solve3D();
+    }
+  }, [appMode, solve3D]);
+
   const handleDownloadReport = () => {
     if (!results) return;
     const maxMoment = Math.max(...results.map(r => Math.abs(r.moment)));
@@ -638,12 +783,13 @@ export default function App() {
       {/* ===== Main Content ===== */}
       <div className="main-content">
         {/* ----- Left Toolbar ----- */}
-        <nav className="toolbar">
+        <nav className="toolbar" style={{ opacity: appMode === '3d' ? 0.5 : 1, transition: 'opacity 0.2s' }}>
           <button 
             className={`toolbar__btn ${activeTool === 'select' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip="Wskaźnik (Wybierz)" 
+            data-tooltip={appMode === '3d' ? "Wskaźnik (tylko 2D)" : "Wskaźnik (Wybierz)"} 
             onClick={() => setActiveTool('select')}
             id="tool-select"
+            disabled={appMode === '3d'}
           >
             ◇
           </button>
@@ -657,43 +803,48 @@ export default function App() {
           </button>
           <button 
             className={`toolbar__btn ${activeTool === 'draw_beam' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip="Rysuj belkę (Odręczny szkic)" 
+            data-tooltip={appMode === '3d' ? "Rysuj belkę (tylko 2D)" : "Rysuj belkę (Odręczny szkic)"} 
             onClick={() => setActiveTool('draw_beam')}
             id="tool-beam"
+            disabled={appMode === '3d'}
           >
             ✏
           </button>
           <div className="toolbar__separator" />
           <button 
             className={`toolbar__btn ${activeTool === 'add_support_pinned' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip="Dodaj podporę stałą (przegubową)" 
+            data-tooltip={appMode === '3d' ? "Dodaj podporę (tylko 2D)" : "Dodaj podporę stałą (przegubową)"} 
             onClick={() => setActiveTool('add_support_pinned')}
             id="tool-pinned"
+            disabled={appMode === '3d'}
           >
             △
           </button>
           <button 
             className={`toolbar__btn ${activeTool === 'add_support_roller' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip="Dodaj podporę przesuwną" 
+            data-tooltip={appMode === '3d' ? "Dodaj podporę (tylko 2D)" : "Dodaj podporę przesuwną"} 
             onClick={() => setActiveTool('add_support_roller')}
             id="tool-roller"
+            disabled={appMode === '3d'}
           >
             ○
           </button>
           <button 
             className={`toolbar__btn ${activeTool === 'add_support_fixed' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip="Dodaj utwierdzenie" 
+            data-tooltip={appMode === '3d' ? "Dodaj utwierdzenie (tylko 2D)" : "Dodaj utwierdzenie"} 
             onClick={() => setActiveTool('add_support_fixed')}
             id="tool-fixed"
+            disabled={appMode === '3d'}
           >
             ◫
           </button>
           <div className="toolbar__separator" />
           <button 
             className={`toolbar__btn ${activeTool === 'add_point_load' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip="Dodaj obciążenie skupione" 
+            data-tooltip={appMode === '3d' ? "Dodaj obciążenie (tylko 2D)" : "Dodaj obciążenie skupione"} 
             onClick={() => setActiveTool('add_point_load')}
             id="tool-point-load"
+            disabled={appMode === '3d'}
           >
             ↓
           </button>
@@ -701,7 +852,13 @@ export default function App() {
             ⇣
           </button>
           <div className="toolbar__separator" />
-          <button className="toolbar__btn" data-tooltip="Uruchom solver" onClick={solve} id="tool-solve">
+          <button 
+            className="toolbar__btn" 
+            data-tooltip={appMode === '3d' ? "Solver (tylko 2D)" : "Uruchom solver"} 
+            onClick={solve} 
+            id="tool-solve"
+            disabled={appMode === '3d'}
+          >
             ▶
           </button>
         </nav>
@@ -709,7 +866,7 @@ export default function App() {
         {/* ----- Canvas Area ----- */}
         <div className="canvas-area canvas-grid">
           {appMode === '3d' ? (
-            <Canvas3D />
+            <Canvas3D results={results3D} />
           ) : !results ? (
             <div className="welcome-overlay">
               <div className="welcome-overlay__icon">🏗</div>
@@ -783,6 +940,7 @@ export default function App() {
 
           {appMode === '3d' ? (
             <div style={{ padding: '16px', color: '#94a3b8' }}>
+              {/* Generator Info Widget */}
               <div style={{
                 background: 'rgba(139, 92, 246, 0.1)',
                 border: '1px solid rgba(139, 92, 246, 0.2)',
@@ -791,16 +949,12 @@ export default function App() {
                 marginBottom: '16px'
               }}>
                 <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#c4b5fd', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <Box size={16} /> Gotowość 3D
+                  <Box size={16} /> Parametry Ramy 3D Pro
                 </h3>
                 <p style={{ margin: '0 0 16px 0', fontSize: '12px', lineHeight: 1.5 }}>
-                  Panel właściwości modelu przestrzennego. Parametry siatki 3D, współrzędne węzłów (X, Y, Z) i definicje ram zostaną wkrótce udostępnione.
+                  Parametryczny generator hal stalowych o 6 stopniach swobody (DOF) na węzeł. Modyfikuj parametry, aby wyliczyć siły w czasie rzeczywistym.
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                    <span>Siatka robocza (Grid)</span>
-                    <span style={{ color: '#fff' }}>20 x 20 m</span>
-                  </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
                     <span>Aktywny solver</span>
                     <span style={{ color: '#8b5cf6', fontWeight: 'bold' }}>solve_mesh_3d</span>
@@ -809,6 +963,96 @@ export default function App() {
                     <span>Stopnie swobody (DOF)</span>
                     <span style={{ color: '#fff' }}>6 na węzeł</span>
                   </div>
+                </div>
+              </div>
+
+              {/* Sliders Area */}
+              <div className="panel-section" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <h3 className="panel-heading">Geometria Przestrzenna</h3>
+
+                {/* Width B */}
+                <div className="param-group">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <label className="param-label" style={{ margin: 0 }}>Szerokość hali B [m]</label>
+                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{width3D.toFixed(1)} m</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="4.0"
+                    max="20.0"
+                    step="0.5"
+                    value={width3D}
+                    onChange={(e) => setWidth3D(parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                  />
+                </div>
+
+                {/* Height H */}
+                <div className="param-group">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <label className="param-label" style={{ margin: 0 }}>Wysokość słupa H [m]</label>
+                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{height3D.toFixed(1)} m</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="3.0"
+                    max="10.0"
+                    step="0.5"
+                    value={height3D}
+                    onChange={(e) => setHeight3D(parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                  />
+                </div>
+
+                {/* Roof Slope Alpha */}
+                <div className="param-group">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <label className="param-label" style={{ margin: 0 }}>Kąt nachylenia dachu α [°]</label>
+                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{slope3D.toFixed(0)}°</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="5"
+                    max="45"
+                    step="1"
+                    value={slope3D}
+                    onChange={(e) => setSlope3D(parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                  />
+                </div>
+
+                {/* Length L */}
+                <div className="param-group">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <label className="param-label" style={{ margin: 0 }}>Długość całkowita L [m]</label>
+                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{length3D.toFixed(1)} m</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="3.0"
+                    max="15.0"
+                    step="0.5"
+                    value={length3D}
+                    onChange={(e) => setLength3D(parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                  />
+                </div>
+
+                {/* Bays n_bays */}
+                <div className="param-group">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <label className="param-label" style={{ margin: 0 }}>Liczba segmentów (n_bays)</label>
+                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{bays3D}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="5"
+                    step="1"
+                    value={bays3D}
+                    onChange={(e) => setBays3D(parseInt(e.target.value))}
+                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                  />
                 </div>
               </div>
             </div>
