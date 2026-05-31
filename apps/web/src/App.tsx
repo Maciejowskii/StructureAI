@@ -492,10 +492,6 @@ export default function App() {
       nodes.push({ id: `N_ridge_${b}`, x: 0, y: H_ridge, z, supportRestraints: [false, false, false, false, false, false] });
     }
 
-    const E = 210e9;
-    const G = 80e9;
-    const J = 1.0e-8; // Default torsion constant
-
     const colProps = STEEL_PROFILES_3D[columnSection] || STEEL_PROFILES_3D['HEB200'];
     const rafProps = STEEL_PROFILES_3D[rafterSection] || STEEL_PROFILES_3D['IPE220'];
     const braceProps = STEEL_PROFILES_3D[bracingSection] || STEEL_PROFILES_3D['IPE100'];
@@ -504,21 +500,21 @@ export default function App() {
       // Columns
       elements.push({ 
         id: `Col_L_${b}`, startNode: `N_base_L_${b}`, endNode: `N_eaves_L_${b}`, 
-        e: E, g: G, ...colProps, j: colProps.j || J, groupId: "columns" 
+        ...colProps, groupId: "columns" 
       });
       elements.push({ 
         id: `Col_R_${b}`, startNode: `N_base_R_${b}`, endNode: `N_eaves_R_${b}`, 
-        e: E, g: G, ...colProps, j: colProps.j || J, groupId: "columns" 
+        ...colProps, groupId: "columns" 
       });
       
       // Rafters
       elements.push({ 
         id: `Raf_L_${b}`, startNode: `N_eaves_L_${b}`, endNode: `N_ridge_${b}`, 
-        e: E, g: G, ...rafProps, j: rafProps.j || J, groupId: "rafters" 
+        ...rafProps, groupId: "rafters" 
       });
       elements.push({ 
         id: `Raf_R_${b}`, startNode: `N_ridge_${b}`, endNode: `N_eaves_R_${b}`, 
-        e: E, g: G, ...rafProps, j: rafProps.j || J, groupId: "rafters" 
+        ...rafProps, groupId: "rafters" 
       });
     }
 
@@ -527,28 +523,28 @@ export default function App() {
       // Eaves girts
       elements.push({ 
         id: `Girt_L_${b}`, startNode: `N_eaves_L_${b}`, endNode: `N_eaves_L_${b+1}`, 
-        e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
+        ...braceProps, groupId: "bracings" 
       });
       elements.push({ 
         id: `Girt_R_${b}`, startNode: `N_eaves_R_${b}`, endNode: `N_eaves_R_${b+1}`, 
-        e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
+        ...braceProps, groupId: "bracings" 
       });
       
       // Ridge purlins
       elements.push({ 
         id: `Purlin_R_${b}`, startNode: `N_ridge_${b}`, endNode: `N_ridge_${b+1}`, 
-        e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
+        ...braceProps, groupId: "bracings" 
       });
 
       // X-bracing in the first and last bays (diagonal members)
       if (b === 0 || b === bays - 1) {
         elements.push({ 
           id: `Brace_Col_L_${b}`, startNode: `N_base_L_${b}`, endNode: `N_eaves_L_${b+1}`, 
-          e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
+          ...braceProps, groupId: "bracings" 
         });
         elements.push({ 
           id: `Brace_Col_R_${b}`, startNode: `N_base_R_${b}`, endNode: `N_eaves_R_${b+1}`, 
-          e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
+          ...braceProps, groupId: "bracings" 
         });
       }
     }
@@ -557,11 +553,11 @@ export default function App() {
     for (let b = 0; b <= bays; b++) {
       distributed_loads.push({
         elementId: `Raf_L_${b}`,
-        value: -24000.0, // N/m vertical distributed load
+        value: -24.0, // kN/m vertical distributed load
       });
       distributed_loads.push({
         elementId: `Raf_R_${b}`,
-        value: -24000.0,
+        value: -24.0,
       });
     }
 
@@ -739,11 +735,11 @@ export default function App() {
         el.id === elementId ? {
           ...el,
           sectionId,
-          iy: props.iy * 1e-8,
-          iz: props.iz * 1e-8,
-          area: props.area * 1e-4,
-          wy: props.wy * 1e-6,
-          wz: props.wz * 1e-6
+          iy: props.iy,
+          iz: props.iz,
+          area: props.area,
+          wy: props.wy,
+          wz: props.wz
         } : el
       );
       return {
@@ -783,10 +779,7 @@ export default function App() {
         id: newId,
         startNode: startNodeId,
         endNode: endNodeId,
-        e: 210e9,
-        g: 80e9,
         ...defaultProps,
-        j: defaultProps.j || 1.0e-8,
         sectionId: rafterSection,
         groupId: "rafters"
       };

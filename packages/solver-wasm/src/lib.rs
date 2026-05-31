@@ -170,7 +170,7 @@ pub struct Node3D {
     pub x: f64,
     pub y: f64,
     pub z: f64,
-    pub support_restraints: Vec<bool>, // [Tx, Ty, Tz, Rx, Ry, Rz]
+    pub support_restraints: Vec<bool>, // Tablica 6 booli: [Tx, Ty, Tz, Rx, Ry, Rz]
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -179,22 +179,19 @@ pub struct Element3D {
     pub id: String,
     pub start_node: String,
     pub end_node: String,
-    pub e: f64,
-    pub g: f64,
-    pub area: f64,
-    pub iy: f64,
-    pub iz: f64,
-    pub j: f64,
-    pub wy: f64,
-    pub wz: f64,
-    pub group_id: String,
+    pub iy: f64,          // Moment bezwładności osi silnej [m^4]
+    pub iz: f64,          // Moment bezwładności osi słabej [m^4]
+    pub area: f64,        // Pole przekroju [m^2]
+    pub wy: f64,          // Wskaźnik wytrzymałości osi silnej [m^3]
+    pub wz: f64,          // Wskaźnik wytrzymałości osi słabej [m^3]
+    pub group_id: String, // "columns" | "rafters" | "bracings"
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DistributedLoad3D {
     pub element_id: String,
-    pub value: f64,
+    pub value: f64,       // Obciążenie [kN/m] działające pionowo w dół
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -218,7 +215,7 @@ pub struct SolverOutput3D {
     pub error: Option<String>,
     pub displacements: std::collections::HashMap<String, Vec<f64>>,
     pub reactions: std::collections::HashMap<String, Vec<f64>>,
-    pub utilization: std::collections::HashMap<String, Vec<f64>>,
+    pub utilization: std::collections::HashMap<String, Vec<f64>>, // RZECZYWISTA MAPA 5 WARTOŚCI WYTĘŻENIA NA PRĘT
 }
 
 pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
@@ -260,30 +257,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             continue;
         }
 
-        let d_xz = (dx * dx + dz * dz).sqrt();
-        let cos_alpha = if l > 1e-9 { d_xz / l } else { 1.0 };
-        let sin_alpha = if l > 1e-9 { dy / l } else { 0.0 };
-
-        let q = load.value;
-        let q_local_y = q * cos_alpha;
-        let q_local_x = q * sin_alpha;
-
-        let f_y1 = q_local_y * l / 2.0;
-        let m_z1 = q_local_y * l * l / 12.0;
-        let f_y2 = q_local_y * l / 2.0;
-        let m_z2 = -q_local_y * l * l / 12.0;
-
-        let f_x1 = q_local_x * l / 2.0;
-        let f_x2 = q_local_x * l / 2.0;
-
-        let mut f_local = DVector::<f64>::zeros(12);
-        f_local[0] = f_x1;
-        f_local[1] = f_y1;
-        f_local[5] = m_z1;
-        f_local[6] = f_x2;
-        f_local[7] = f_y2;
-        f_local[11] = m_z2;
-
         let mut r = nalgebra::Matrix3::<f64>::zeros();
         let vx = nalgebra::Vector3::new(dx / l, dy / l, dz / l);
         let vy: nalgebra::Vector3<f64>;
@@ -301,6 +274,25 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         r[(0, 0)] = vx.x; r[(0, 1)] = vx.y; r[(0, 2)] = vx.z;
         r[(1, 0)] = vy.x; r[(1, 1)] = vy.y; r[(1, 2)] = vy.z;
         r[(2, 0)] = vz.x; r[(2, 1)] = vz.y; r[(2, 2)] = vz.z;
+
+        let q = load.value;
+        let q_local_x = -q * 1000.0 * r[(0, 1)];
+        let q_local_y = -q * 1000.0 * r[(1, 1)];
+        let q_local_z = -q * 1000.0 * r[(2, 1)];
+
+        let mut f_local = DVector::<f64>::zeros(12);
+        f_local[0] = q_local_x * l / 2.0;
+        f_local[1] = q_local_y * l / 2.0;
+        f_local[2] = q_local_z * l / 2.0;
+        f_local[3] = 0.0;
+        f_local[4] = -q_local_z * l * l / 12.0;
+        f_local[5] = q_local_y * l * l / 12.0;
+        f_local[6] = q_local_x * l / 2.0;
+        f_local[7] = q_local_y * l / 2.0;
+        f_local[8] = q_local_z * l / 2.0;
+        f_local[9] = 0.0;
+        f_local[10] = q_local_z * l * l / 12.0;
+        f_local[11] = -q_local_y * l * l / 12.0;
 
         let mut t = DMatrix::<f64>::zeros(12, 12);
         for i in 0..4 {
@@ -361,12 +353,12 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         r[(2, 0)] = vz.x; r[(2, 1)] = vz.y; r[(2, 2)] = vz.z;
 
         let mut k_local = DMatrix::<f64>::zeros(12, 12);
-        let e = el.e;
-        let g = el.g;
+        let e = 210e9;
+        let g = 80e9;
         let area = el.area;
         let iy = el.iy;
         let iz = el.iz;
-        let j = el.j;
+        let j = 1e-8;
 
         let l2 = l * l;
         let l3 = l2 * l;
@@ -508,10 +500,10 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         r[(1, 0)] = vy.x; r[(1, 1)] = vy.y; r[(1, 2)] = vy.z;
         r[(2, 0)] = vz.x; r[(2, 1)] = vz.y; r[(2, 2)] = vz.z;
 
-        let mut u_global_el = DVector::<f64>::zeros(12);
-        for d in 0..6 {
-            u_global_el[d] = u_solved[start_idx * 6 + d];
-            u_global_el[6 + d] = u_solved[end_idx * 6 + d];
+        let mut d_global = DVector::<f64>::zeros(12);
+        for idx in 0..6 {
+            d_global[idx] = u_solved[start_idx * 6 + idx];
+            d_global[6 + idx] = u_solved[end_idx * 6 + idx];
         }
 
         let mut t = DMatrix::<f64>::zeros(12, 12);
@@ -519,15 +511,15 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             t.fixed_view_mut::<3, 3>(i * 3, i * 3).copy_from(&r);
         }
 
-        let u_local_el = &t * &u_global_el;
+        let d_local = &t * &d_global;
 
         let mut k_local = DMatrix::<f64>::zeros(12, 12);
-        let e = el.e;
-        let g = el.g;
+        let e = 210e9;
+        let g = 80e9;
         let area = el.area;
         let iy = el.iy;
         let iz = el.iz;
-        let j = el.j;
+        let j = 1e-8;
         let wy = el.wy;
         let wz = el.wz;
         let l2 = l * l;
@@ -550,39 +542,37 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         k_local[(8, 2)] = -b_y_12;  k_local[(8, 4)] = b_y_6;   k_local[(8, 8)] = b_y_12;   k_local[(8, 10)] = b_y_6;
         k_local[(10, 2)] = -b_y_6;  k_local[(10, 4)] = b_y_2;  k_local[(10, 8)] = b_y_6;   k_local[(10, 10)] = b_y_4;
 
-        let f_local_el = &k_local * &u_local_el;
+        let f_local = &k_local * &d_local;
 
         // distributed load calculation
         let mut q_local_y = 0.0;
         let mut q_local_x = 0.0;
+        let mut q_local_z = 0.0;
         if let Some(load) = input_model.loads.iter().find(|l| l.element_id == el.id) {
-            let d_xz = (dx * dx + dz * dz).sqrt();
-            let cos_alpha = if l > 1e-9 { d_xz / l } else { 1.0 };
-            let sin_alpha = if l > 1e-9 { dy / l } else { 0.0 };
             let q = load.value;
-            q_local_y = q * cos_alpha;
-            q_local_x = q * sin_alpha;
+            q_local_x = -q * 1000.0 * r[(0, 1)];
+            q_local_y = -q * 1000.0 * r[(1, 1)];
+            q_local_z = -q * 1000.0 * r[(2, 1)];
         }
 
         let mut utils_5 = Vec::new();
         let fy = 235.0e6; // S235 yield strength in N/m^2 (Pa)
 
-        for i in 0..5 {
-            let xi = (i as f64) * 0.25 * l;
+        for step in 0..5 {
+            let xi = (step as f64) * 0.25;
+            let x_loc = xi * l;
 
-            // Internal forces at control point xi
-            let n_xi = -f_local_el[0] - q_local_x * xi;
-            let mz_xi = -f_local_el[5] - f_local_el[1] * xi - q_local_y * xi * xi / 2.0;
-            let my_xi = -f_local_el[4] + f_local_el[2] * xi;
+            // Funkcje sił wewnętrznych uwzględniające obciążenia przęsłowe
+            let n_x = -f_local[0] - q_local_x * x_loc;
+            let my_x = -f_local[4] * (1.0 - xi) + f_local[10] * xi - 0.5 * q_local_z * x_loc * (l - x_loc);
+            let mz_x = -f_local[5] * (1.0 - xi) + f_local[11] * xi - 0.5 * q_local_y * x_loc * (l - x_loc);
 
-            // Compression buckling reduction factor chi
-            let is_compressed = n_xi < 0.0;
-            let chi = if is_compressed { 0.6 } else { 1.0 };
+            // Eurokod 3 SGN: Wyboczenie pręta ściskanego (N < 0)
+            let chi = if n_x < 0.0 { 0.6 } else { 1.0 }; // Współczynnik redukcyjny dla uproszczonego wyboczenia
 
-            // ULS Eurocode 3 calculation: util = |N| / (chi * A * fy) + |My| / (Wy * fy) + |Mz| / (Wz * fy)
-            let term_n = if (area > 0.0) && (fy > 0.0) { n_xi.abs() / (chi * area * fy) } else { 0.0 };
-            let term_my = if (wy > 0.0) && (fy > 0.0) { my_xi.abs() / (wy * fy) } else { 0.0 };
-            let term_wz = if (wz > 0.0) && (fy > 0.0) { mz_xi.abs() / (wz * fy) } else { 0.0 };
+            let term_n = if (area > 0.0) && (fy > 0.0) { n_x.abs() / (chi * area * fy) } else { 0.0 };
+            let term_my = if (wy > 0.0) && (fy > 0.0) { my_x.abs() / (wy * fy) } else { 0.0 };
+            let term_wz = if (wz > 0.0) && (fy > 0.0) { mz_x.abs() / (wz * fy) } else { 0.0 };
 
             let util = term_n + term_my + term_wz;
             utils_5.push(util);
@@ -1269,46 +1259,41 @@ mod tests {
     #[test]
     fn test_fem_3d_portal_frame() {
         let nodes = vec![
-            Node3D { id: "N1".to_string(), x: 0.0, y: 0.0, z: 0.0, support_type: "Fixed".to_string() },
-            Node3D { id: "N2".to_string(), x: 0.0, y: 4.0, z: 0.0, support_type: "Free".to_string() },
+            Node3D { id: "N1".to_string(), x: 0.0, y: 0.0, z: 0.0, support_restraints: vec![true, true, true, true, true, true] },
+            Node3D { id: "N2".to_string(), x: 4.0, y: 0.0, z: 0.0, support_restraints: vec![false, false, false, false, false, false] },
         ];
         let elements = vec![
             Element3D {
                 id: "E1".to_string(),
-                start_node_id: "N1".to_string(),
-                end_node_id: "N2".to_string(),
-                e: 210e9,
-                g: 80e9,
+                start_node: "N1".to_string(),
+                end_node: "N2".to_string(),
                 area: 2.85e-3,
                 iy: 1.42e-6,
                 iz: 1.943e-5,
-                j: 7e-8,
                 wy: 1.0e-5,
                 wz: 1.0e-4,
+                group_id: "columns".to_string(),
             }
         ];
         let loads = vec![
-            Load3D {
-                node_id: "N2".to_string(),
-                fx: 10000.0, // 10 kN lateral load
-                fy: 0.0,
-                fz: 0.0,
-                mx: 0.0,
-                my: 0.0,
-                mz: 0.0,
+            DistributedLoad3D {
+                element_id: "E1".to_string(),
+                value: -10.0, // kN/m vertical load
             }
         ];
 
-        let model = InputModel3D { nodes, elements, loads, distributed_loads: vec![] };
+        let geometry = Geometry3D { nodes, elements };
+        let model = InputModel3D { geometry, loads };
         let output = solve_mesh_3d_internal(&model);
 
         assert!(output.success);
-        assert_eq!(output.nodes.len(), 2);
+        assert!(output.displacements.contains_key("N2"));
         
-        let n2_res = &output.nodes[1];
-        assert_eq!(n2_res.id, "N2");
-        // Lateral displacement of vertical cantilever under end load: P * L^3 / (3 * E * I)
-        // 10000 * 64 / (3 * 210e9 * 1.943e-5) = 640000 / 12240900 = 0.05228 m = 52.28 mm
-        assert!((n2_res.ux - 52.28).abs() < 0.5, "ux was: {}", n2_res.ux);
+        let n2_disp = &output.displacements["N2"];
+        let uy = n2_disp[1]; // y-displacement in mm
+        
+        // Theoretical vertical deflection: q * L^4 / (8 * E * Iz)
+        // 10000 * 256 / (8 * 210e9 * 1.943e-5) = 2560000 / 3.26424e7 = 0.078425 m = 78.425 mm
+        assert!((uy - 78.425).abs() < 1.0, "uy was: {}", uy);
     }
 }
