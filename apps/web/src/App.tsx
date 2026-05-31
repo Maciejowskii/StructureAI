@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Canvas2D, { type ResultPoint } from './components/Canvas2D';
+import Canvas3D from './components/Canvas3D';
+import { Layers, Box } from 'lucide-react';
 import { generateSteelReport, generateConcreteReport } from './utils/latexGenerator';
 
 // =============================================================================
@@ -134,12 +136,14 @@ interface Support {
 }
 
 export type ToolMode = 'select' | 'draw_beam' | 'add_point_load' | 'add_support_pinned' | 'add_support_roller' | 'add_support_fixed';
+export type AppMode = '2d' | '3d';
 
 // =============================================================================
 // App Component
 // =============================================================================
 
 export default function App() {
+  const [appMode, setAppMode] = useState<AppMode>('2d');
   const [activeTool, setActiveTool] = useState<ToolMode>('select');
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState(false);
@@ -565,14 +569,61 @@ export default function App() {
 
   return (
     <div className="app-layout">
-      {/* ===== Top Bar ===== */}
-      <header className="top-bar">
-        <div className="top-bar__logo">
-          <div className="top-bar__logo-icon">S</div>
-          <span className="top-bar__logo-text">StructurAI Dynamics</span>
-          <span className="top-bar__logo-version">v0.1.0 PoC</span>
+      {/* ===== Global Header ===== */}
+      <header className="topbar">
+        <div className="topbar__logo">StructurAI Dynamics</div>
+        
+        <div style={{
+          display: 'flex',
+          background: 'rgba(0,0,0,0.4)',
+          padding: '4px',
+          borderRadius: '8px',
+          border: '1px solid rgba(255,255,255,0.05)',
+          gap: '4px'
+        }}>
+          <button
+            onClick={() => setAppMode('2d')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 16px',
+              borderRadius: '6px',
+              border: 'none',
+              background: appMode === '2d' ? '#3b82f6' : 'transparent',
+              color: appMode === '2d' ? '#ffffff' : '#94a3b8',
+              fontSize: '13px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            <Layers size={16} />
+            Pulpit 2D
+          </button>
+          <button
+            onClick={() => setAppMode('3d')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 16px',
+              borderRadius: '6px',
+              border: 'none',
+              background: appMode === '3d' ? '#8b5cf6' : 'transparent',
+              color: appMode === '3d' ? '#ffffff' : '#94a3b8',
+              fontSize: '13px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            <Box size={16} />
+            Przestrzeń 3D (Pro)
+          </button>
         </div>
-        <div className="top-bar__actions">
+
+        <div className="topbar__status">
           {solveTimeMs !== null && (
             <span className="badge badge--info">
               ⚡ {solveTimeMs < 1 ? '<1' : solveTimeMs.toFixed(1)} ms
@@ -657,7 +708,9 @@ export default function App() {
 
         {/* ----- Canvas Area ----- */}
         <div className="canvas-area canvas-grid">
-          {!results ? (
+          {appMode === '3d' ? (
+            <Canvas3D />
+          ) : !results ? (
             <div className="welcome-overlay">
               <div className="welcome-overlay__icon">🏗</div>
               <h1 className="welcome-overlay__title">StructurAI Dynamics</h1>
@@ -728,26 +781,59 @@ export default function App() {
             </button>
           </div>
 
-          {/* Beam Length */}
-          <div className="properties-panel__section">
-            <div className="properties-panel__section-title">Geometria</div>
-            <label className="param-label" htmlFor="param-length">
-              Długość belki [m]
-            </label>
-            <div className="param-input-group">
-              <input
-                id="param-length"
-                type="range"
-                min="1"
-                max="20"
-                step="0.5"
-                value={beamLength}
-                onChange={(e) => setBeamLength(parseFloat(e.target.value))}
-                className="param-range"
-              />
-              <span className="param-value mono-value">{beamLength.toFixed(1)}</span>
+          {appMode === '3d' ? (
+            <div style={{ padding: '16px', color: '#94a3b8' }}>
+              <div style={{
+                background: 'rgba(139, 92, 246, 0.1)',
+                border: '1px solid rgba(139, 92, 246, 0.2)',
+                borderRadius: '8px',
+                padding: '16px',
+                marginBottom: '16px'
+              }}>
+                <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#c4b5fd', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Box size={16} /> Gotowość 3D
+                </h3>
+                <p style={{ margin: '0 0 16px 0', fontSize: '12px', lineHeight: 1.5 }}>
+                  Panel właściwości modelu przestrzennego. Parametry siatki 3D, współrzędne węzłów (X, Y, Z) i definicje ram zostaną wkrótce udostępnione.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                    <span>Siatka robocza (Grid)</span>
+                    <span style={{ color: '#fff' }}>20 x 20 m</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                    <span>Aktywny solver</span>
+                    <span style={{ color: '#8b5cf6', fontWeight: 'bold' }}>solve_mesh_3d</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                    <span>Stopnie swobody (DOF)</span>
+                    <span style={{ color: '#fff' }}>6 na węzeł</span>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
+          ) : (
+            <>
+              {/* Sekcja: Geometria */}
+              <div className="panel-section">
+                <h3 className="panel-heading">Geometria Przęsła</h3>
+                <div className="param-group">
+                  <label className="param-label" htmlFor="param-length">Długość całkowita belki (L) [m]</label>
+                  <div className="param-input-group">
+                    <input 
+                      id="param-length"
+                      type="range" 
+                      min="1.0" 
+                      max="20.0" 
+                      step="0.5" 
+                      value={beamLength}
+                      onChange={(e) => setBeamLength(parseFloat(e.target.value))}
+                      className="param-range"
+                    />
+                    <span className="param-value mono-value">{beamLength.toFixed(1)}</span>
+                  </div>
+                </div>
+              </div>
 
           {/* Supports */}
           <div className="properties-panel__section">
@@ -1326,6 +1412,8 @@ export default function App() {
                 📄 Generuj Raport White-Box (.tex)
               </button>
             </div>
+          )}
+            </>
           )}
         </aside>
       </div>

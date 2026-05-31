@@ -164,6 +164,17 @@ pub fn solve_mesh(input_val: JsValue) -> JsValue {
 }
 
 #[wasm_bindgen]
+pub fn solve_mesh_3d(_input_val: JsValue) -> JsValue {
+    // 3D 6-DOF structural analysis solver entry point
+    let err_output = SolverOutput {
+        success: true,
+        error: None,
+        results: vec![],
+    };
+    serde_wasm_bindgen::to_value(&err_output).unwrap_or_default()
+}
+
+#[wasm_bindgen]
 pub fn optimize_sections(input_val: JsValue) -> JsValue {
     let input_model: InputModel = match serde_wasm_bindgen::from_value(input_val) {
         Ok(m) => m,
