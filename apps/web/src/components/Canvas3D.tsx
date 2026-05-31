@@ -6,7 +6,7 @@ interface Canvas3DProps {
   deformationScale: number;
   activeTool?: string;
   selectedEntity?: { type: 'node' | 'element', id: string } | null;
-  onSelectEntity?: (type: 'node' | 'element' | null, id: string | null) => void;
+  onSelectEntity?: (entity: { type: 'node' | 'element', id: string } | null) => void;
   onAddElement3D?: (startNodeId: string, endNodeId: string) => void;
 }
 
@@ -25,15 +25,14 @@ export default function Canvas3D({
   const [zoom, setZoom] = useState(1.1);
   const [pulseTime, setPulseTime] = useState(0);
 
-  // Selection states
+  // Selection states synced to parent
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
-  // Free beam drawing states
+  // Drag rod drawing states
   const [dragStartNodeId, setDragStartNodeId] = useState<string | null>(null);
   const [dragCurrentPos, setDragCurrentPos] = useState<{ x: number, y: number } | null>(null);
 
-  // Refs for callbacks and tools to avoid constant event listener re-binding
   const activeToolRef = useRef(activeTool);
   activeToolRef.current = activeTool;
 
@@ -46,7 +45,7 @@ export default function Canvas3D({
   const projectedNodesRef = useRef<{ id: string, x: number, y: number }[]>([]);
   const projectedElementsRef = useRef<{ id: string, x1: number, y1: number, x2: number, y2: number }[]>([]);
 
-  // Sync internal selections with parent selectedEntity prop
+  // Sync selection with prop
   useEffect(() => {
     if (selectedEntity) {
       if (selectedEntity.type === 'node') {
@@ -62,29 +61,16 @@ export default function Canvas3D({
     }
   }, [selectedEntity]);
 
-  // Scientific-grade color mapping function for Eurocode 3
+  // Engineering stress color mapping function
   const getColorForUtilization = (val: number): string => {
-    // Maps val [0.0, 1.2] to Blue -> Green -> Yellow -> Red
-    const u = Math.max(0, Math.min(1.2, val));
-    if (u <= 0.3) {
-      const t = u / 0.3;
-      const h = 217 - t * (217 - 142); // Blue (217) to Sea Green (142)
-      return `hsl(${h}, 90%, 55%)`;
-    } else if (u <= 0.7) {
-      const t = (u - 0.3) / 0.4;
-      const h = 142 - t * (142 - 55); // Sea Green (142) to Yellow (55)
-      return `hsl(${h}, 90%, 50%)`;
-    } else if (u <= 1.0) {
-      const t = (u - 0.7) / 0.3;
-      const h = 55 - t * 55; // Yellow (55) to Red (0)
-      return `hsl(${h}, 95%, 50%)`;
-    } else {
-      // Overload (red glow)
-      return `hsl(0, 100%, 50%)`;
-    }
+    if (val <= 0.2) return '#3b82f6'; // Bright blue
+    if (val <= 0.5) return '#10b981'; // Emerald green
+    if (val <= 0.8) return '#eab308'; // Solar yellow
+    if (val <= 1.0) return '#f97316'; // Orange
+    return '#ef4444'; // Red (SGN exceeded)
   };
 
-  // Redraw tick for pulsing animation
+  // Pulsing tick
   useEffect(() => {
     let animFrameId: number;
     const updatePulse = () => {
@@ -95,12 +81,21 @@ export default function Canvas3D({
     return () => cancelAnimationFrame(animFrameId);
   }, []);
 
-  // Raycasting / Selection helper
-  const getHitTarget = (xm: number, ym: number) => {
-    // 1. Check nodes first (radius 15px)
+  // Raycasting distance helper (point to segment)
+  const distToSegment = (p: { x: number, y: number }, v: { x: number, y: number }, w: { x: number, y: number }): number => {
+    const l2 = Math.hypot(v.x - w.x, v.y - w.y) ** 2;
+    if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
+    let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(p.x - (v.x + t * (w.x - v.x)), p.y - (v.y + t * (w.y - v.y)));
+  };
+
+  // Click Hit Testing (Raycasting)
+  const performHitTest = (xm: number, ym: number) => {
+    // 1. Sprawdzamy węzły (Node Hit Testing - 15px radius)
     let nearestNode: { id: string, dist: number } | null = null;
     projectedNodesRef.current.forEach(n => {
-      const dist = Math.sqrt((n.x - xm) ** 2 + (n.y - ym) ** 2);
+      const dist = Math.hypot(xm - n.x, ym - n.y);
       if (dist < 15) {
         if (!nearestNode || dist < nearestNode.dist) {
           nearestNode = { id: n.id, dist };
@@ -112,35 +107,12 @@ export default function Canvas3D({
       return { type: 'node' as const, id: (nearestNode as any).id };
     }
 
-    // 2. Check elements (line distance < 10px)
+    // 2. Sprawdzamy pręty (Element Hit Testing - 10px line distance)
     let nearestElement: { id: string, dist: number } | null = null;
     projectedElementsRef.current.forEach(el => {
-      const { x1, y1, x2, y2 } = el;
-      const A = xm - x1;
-      const B = ym - y1;
-      const C = x2 - x1;
-      const D = y2 - y1;
-
-      const dot = A * C + B * D;
-      const lenSq = C * C + D * D;
-      let param = -1;
-      if (lenSq !== 0) {
-        param = dot / lenSq;
-      }
-
-      let xx, yy;
-      if (param < 0) {
-        xx = x1;
-        yy = y1;
-      } else if (param > 1) {
-        xx = x2;
-        yy = y2;
-      } else {
-        xx = x1 + param * C;
-        yy = y1 + param * D;
-      }
-
-      const dist = Math.sqrt((xm - xx) ** 2 + (ym - yy) ** 2);
+      const p1 = { x: el.x1, y: el.y1 };
+      const p2 = { x: el.x2, y: el.y2 };
+      const dist = distToSegment({ x: xm, y: ym }, p1, p2);
       if (dist < 10) {
         if (!nearestElement || dist < nearestElement.dist) {
           nearestElement = { id: el.id, dist };
@@ -155,7 +127,7 @@ export default function Canvas3D({
     return null;
   };
 
-  // Drag and Interaction logic
+  // Event handlers
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -170,37 +142,26 @@ export default function Canvas3D({
       const ym = e.clientY - rect.top;
 
       if (activeToolRef.current === 'draw_beam') {
-        // Find if user started drawing from a node
-        const hit = getHitTarget(xm, ym);
+        const hit = performHitTest(xm, ym);
         if (hit && hit.type === 'node') {
           setDragStartNodeId(hit.id);
           setDragCurrentPos({ x: xm, y: ym });
         }
       } else if (activeToolRef.current === 'select') {
-        const hit = getHitTarget(xm, ym);
+        const hit = performHitTest(xm, ym);
         if (hit) {
-          if (hit.type === 'node') {
-            setSelectedNodeId(hit.id);
-            setSelectedElementId(null);
-            if (onSelectEntityRef.current) onSelectEntityRef.current('node', hit.id);
-          } else {
-            setSelectedElementId(hit.id);
-            setSelectedNodeId(null);
-            if (onSelectEntityRef.current) onSelectEntityRef.current('element', hit.id);
+          if (onSelectEntityRef.current) {
+            onSelectEntityRef.current({ type: hit.type, id: hit.id });
           }
         } else {
-          // Clicked in empty space -> clear selection
-          setSelectedNodeId(null);
-          setSelectedElementId(null);
-          if (onSelectEntityRef.current) onSelectEntityRef.current(null, null);
-
-          // Standard camera dragging start
+          if (onSelectEntityRef.current) {
+            onSelectEntityRef.current(null);
+          }
           isDraggingCamera = true;
           startX = e.clientX;
           startY = e.clientY;
         }
       } else {
-        // Any other tool -> drag camera
         isDraggingCamera = true;
         startX = e.clientX;
         startY = e.clientY;
@@ -235,13 +196,12 @@ export default function Canvas3D({
         const xm = e.clientX - rect.left;
         const ym = e.clientY - rect.top;
 
-        const hit = getHitTarget(xm, ym);
+        const hit = performHitTest(xm, ym);
         if (hit && hit.type === 'node' && hit.id !== dragStartNodeId) {
           if (onAddElement3DRef.current) {
             onAddElement3DRef.current(dragStartNodeId, hit.id);
           }
         }
-
         setDragStartNodeId(null);
         setDragCurrentPos(null);
       }
@@ -252,7 +212,7 @@ export default function Canvas3D({
       setZoom(prev => Math.max(0.3, Math.min(4.0, prev - e.deltaY * 0.001)));
     };
 
-    // Mobile touch events support
+    // Touch support for mobiles
     let touchStartX = 0;
     let touchStartY = 0;
     let isTouchDrawing = false;
@@ -264,29 +224,22 @@ export default function Canvas3D({
         const ym = e.touches[0].clientY - rect.top;
 
         if (activeToolRef.current === 'draw_beam') {
-          const hit = getHitTarget(xm, ym);
+          const hit = performHitTest(xm, ym);
           if (hit && hit.type === 'node') {
             setDragStartNodeId(hit.id);
             setDragCurrentPos({ x: xm, y: ym });
             isTouchDrawing = true;
           }
         } else if (activeToolRef.current === 'select') {
-          const hit = getHitTarget(xm, ym);
+          const hit = performHitTest(xm, ym);
           if (hit) {
-            if (hit.type === 'node') {
-              setSelectedNodeId(hit.id);
-              setSelectedElementId(null);
-              if (onSelectEntityRef.current) onSelectEntityRef.current('node', hit.id);
-            } else {
-              setSelectedElementId(hit.id);
-              setSelectedNodeId(null);
-              if (onSelectEntityRef.current) onSelectEntityRef.current('element', hit.id);
+            if (onSelectEntityRef.current) {
+              onSelectEntityRef.current({ type: hit.type, id: hit.id });
             }
           } else {
-            setSelectedNodeId(null);
-            setSelectedElementId(null);
-            if (onSelectEntityRef.current) onSelectEntityRef.current(null, null);
-
+            if (onSelectEntityRef.current) {
+              onSelectEntityRef.current(null);
+            }
             isDraggingCamera = true;
             touchStartX = e.touches[0].clientX;
             touchStartY = e.touches[0].clientY;
@@ -324,9 +277,8 @@ export default function Canvas3D({
       isDraggingCamera = false;
 
       if (isTouchDrawing && dragStartNodeId) {
-        // Use last known drag position
         if (dragCurrentPos) {
-          const hit = getHitTarget(dragCurrentPos.x, dragCurrentPos.y);
+          const hit = performHitTest(dragCurrentPos.x, dragCurrentPos.y);
           if (hit && hit.type === 'node' && hit.id !== dragStartNodeId) {
             if (onAddElement3DRef.current) {
               onAddElement3DRef.current(dragStartNodeId, hit.id);
@@ -385,11 +337,8 @@ export default function Canvas3D({
     ctx.fillRect(0, 0, w, h);
 
     const project = (x: number, y: number, z: number) => {
-      // Rotation around Y (horizontal)
       const x1 = x * Math.cos(angleX) - z * Math.sin(angleX);
       const z1 = x * Math.sin(angleX) + z * Math.cos(angleX);
-
-      // Rotation around X (vertical)
       const y2 = y * Math.cos(angleY) - z1 * Math.sin(angleY);
       const z2 = y * Math.sin(angleY) + z1 * Math.cos(angleY);
 
@@ -402,11 +351,10 @@ export default function Canvas3D({
       return { x: xs, y: ys, zDepth: z2 };
     };
 
-    const geometry = model?.geometry;
-    const nodes: any[] = model?.nodes || geometry?.nodes || [];
-    const elements: any[] = model?.elements || geometry?.elements || [];
+    const nodes: any[] = model?.geometry?.nodes || model?.nodes || [];
+    const elements: any[] = model?.geometry?.elements || model?.elements || [];
 
-    // Find bounding box to center model
+    // Center layout calculations
     let minX = 0, maxX = 0, minY = 0, maxY = 0, minZ = 0, maxZ = 0;
     if (nodes.length > 0) {
       minX = Math.min(...nodes.map(n => n.x));
@@ -423,7 +371,7 @@ export default function Canvas3D({
 
     const scaleFactor = 15.0; // Spatial scaling factor
 
-    // 1. Draw Grid (Z-plane at Y=0)
+    // 1. Draw Grid
     ctx.strokeStyle = 'rgba(30, 41, 59, 0.4)';
     ctx.lineWidth = 1;
     const gridSize = 10;
@@ -467,9 +415,9 @@ export default function Canvas3D({
     ctx.beginPath(); ctx.moveTo(pCenter.x, pCenter.y); ctx.lineTo(pZ.x, pZ.y); ctx.stroke();
     ctx.fillStyle = '#3b82f6'; ctx.fillText('Z', pZ.x + 5, pZ.y + 5);
 
-    // 3. Process and render elements with Depth Cueing & Bending Moments
+    // 3. Process and render elements with Depth Cueing
     if (nodes.length > 0) {
-      // Refresh projected positions refs for raycasting
+      // Refresh projected coords for raycasting
       const projectedNodes: { id: string, x: number, y: number }[] = [];
       nodes.forEach(n => {
         const px = project((n.x - midX) * scaleFactor, (n.y - midY) * scaleFactor, (n.z - midZ) * scaleFactor);
@@ -480,34 +428,32 @@ export default function Canvas3D({
       const projectedElements: { id: string, x1: number, y1: number, x2: number, y2: number }[] = [];
 
       const elementsWithDepth = elements.map(el => {
-        const n1 = nodes.find(n => n.id === el.start_node_id);
-        const n2 = nodes.find(n => n.id === el.end_node_id);
+        const n1 = nodes.find(n => n.id === el.startNode);
+        const n2 = nodes.find(n => n.id === el.endNode);
         if (!n1 || !n2) return null;
 
-        // Start & End projected coordinates (undeformed)
         const p1 = project((n1.x - midX) * scaleFactor, (n1.y - midY) * scaleFactor, (n1.z - midZ) * scaleFactor);
         const p2 = project((n2.x - midX) * scaleFactor, (n2.y - midY) * scaleFactor, (n2.z - midZ) * scaleFactor);
 
         projectedElements.push({ id: el.id, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
 
-        // Projected deformed coordinates
+        // Apply deformation deflection displacement if results exist
         let dp1 = p1;
         let dp2 = p2;
-        if (result && result.nodes) {
-          const resN1 = result.nodes.find((rn: any) => rn.id === n1.id);
-          const resN2 = result.nodes.find((rn: any) => rn.id === n2.id);
+        if (result && result.displacements) {
+          const resN1 = result.displacements[n1.id];
+          const resN2 = result.displacements[n2.id];
           if (resN1 && resN2) {
-            // Apply exaggeration scale with dynamic deformationScale slider
             const exag = 100.0 * (deformationScale / 100.0);
             dp1 = project(
-              (n1.x + (resN1.ux / 1000.0) * exag - midX) * scaleFactor,
-              (n1.y + (resN1.uy / 1000.0) * exag - midY) * scaleFactor,
-              (n1.z + (resN1.uz / 1000.0) * exag - midZ) * scaleFactor
+              (n1.x + (resN1[0] / 1000.0) * exag - midX) * scaleFactor,
+              (n1.y + (resN1[1] / 1000.0) * exag - midY) * scaleFactor,
+              (n1.z + (resN1[2] / 1000.0) * exag - midZ) * scaleFactor
             );
             dp2 = project(
-              (n2.x + (resN2.ux / 1000.0) * exag - midX) * scaleFactor,
-              (n2.y + (resN2.uy / 1000.0) * exag - midY) * scaleFactor,
-              (n2.z + (resN2.uz / 1000.0) * exag - midZ) * scaleFactor
+              (n2.x + (resN2[0] / 1000.0) * exag - midX) * scaleFactor,
+              (n2.y + (resN2[1] / 1000.0) * exag - midY) * scaleFactor,
+              (n2.z + (resN2[2] / 1000.0) * exag - midZ) * scaleFactor
             );
           }
         }
@@ -518,20 +464,19 @@ export default function Canvas3D({
 
       projectedElementsRef.current = projectedElements;
 
-      // Painter's algorithm: sort elements back-to-front
+      // painter's algorithm
       elementsWithDepth.sort((a, b) => b.avgDepth - a.avgDepth);
 
       // Render elements
-      elementsWithDepth.forEach(({ el, p1, p2, dp1, dp2, avgDepth, n1, n2 }) => {
-        // Depth Cueing brightness
+      elementsWithDepth.forEach(({ el, p1, p2, dp1, dp2, avgDepth }) => {
         const maxDist = 300;
         const normDepth = Math.max(0, Math.min(1, (avgDepth + maxDist / 2) / maxDist));
         const brightness = Math.max(0.25, Math.min(1.0, 1.1 - normDepth));
 
-        const isBrace = el.id.includes('Brace');
+        const isBrace = el.groupId === 'bracings';
         const isPurlin = el.id.includes('Purlin') || el.id.includes('Girt');
 
-        // Draw structural member (undeformed element as dotted or solid background line)
+        // Draw structural member (undeformed element as dotted background line)
         ctx.strokeStyle = 'rgba(51, 65, 85, ' + (brightness * 0.3) + ')';
         ctx.lineWidth = 1;
         ctx.setLineDash([3, 3]);
@@ -542,40 +487,30 @@ export default function Canvas3D({
         ctx.setLineDash([]); // Reset
 
         // Fetch utilization array from Rust solver result
-        const uArray = result?.utilization?.[el.id]; // number[] (5 points)
+        const uArray = result?.utilization?.[el.id] || [0.0, 0.0, 0.0, 0.0, 0.0];
 
         let strokeStyle: string | CanvasGradient;
         let shadowColor = '#3b82f6';
         let blurSize = 6;
 
-        if (uArray && uArray.length === 5) {
-          const maxU = Math.max(...uArray);
-          if (maxU <= 0.3) shadowColor = '#3b82f6';
-          else if (maxU <= 0.5) shadowColor = '#10b981';
-          else if (maxU <= 1.0) shadowColor = '#eab308';
-          else {
-            shadowColor = '#ef4444';
-            blurSize = 10 * (0.8 + 0.4 * Math.sin(pulseTime * 0.008));
-          }
-
-          // Create dynamic linear gradient along element
-          const grad = ctx.createLinearGradient(dp1.x, dp1.y, dp2.x, dp2.y);
-          grad.addColorStop(0.0, getColorForUtilization(uArray[0]));
-          grad.addColorStop(0.25, getColorForUtilization(uArray[1]));
-          grad.addColorStop(0.50, getColorForUtilization(uArray[2]));
-          grad.addColorStop(0.75, getColorForUtilization(uArray[3]));
-          grad.addColorStop(1.0, getColorForUtilization(uArray[4]));
-          strokeStyle = grad;
-        } else {
-          // Default styling (when result is not yet available)
-          shadowColor = isBrace ? '#f97316' : isPurlin ? '#3b82f6' : '#a855f7';
-          strokeStyle = isBrace 
-            ? `hsla(24, 95%, 53%, ${brightness})` 
-            : isPurlin 
-              ? `hsla(217, 91%, 60%, ${brightness * 0.8})` 
-              : `hsla(271, 91%, 65%, ${brightness})`;
-          blurSize = 8;
+        const maxU = Math.max(...uArray);
+        if (maxU <= 0.2) shadowColor = '#3b82f6';
+        else if (maxU <= 0.5) shadowColor = '#10b981';
+        else if (maxU <= 0.8) shadowColor = '#eab308';
+        else if (maxU <= 1.0) shadowColor = '#f97316';
+        else {
+          shadowColor = '#ef4444';
+          blurSize = 10 * (0.8 + 0.4 * Math.sin(pulseTime * 0.008));
         }
+
+        // Create linear gradient
+        const grad = ctx.createLinearGradient(dp1.x, dp1.y, dp2.x, dp2.y);
+        grad.addColorStop(0.0, getColorForUtilization(uArray[0]));
+        grad.addColorStop(0.25, getColorForUtilization(uArray[1]));
+        grad.addColorStop(0.50, getColorForUtilization(uArray[2]));
+        grad.addColorStop(0.75, getColorForUtilization(uArray[3]));
+        grad.addColorStop(1.0, getColorForUtilization(uArray[4]));
+        strokeStyle = grad;
 
         // Draw deformed structure member (main glowing view)
         const isSelectedEl = selectedElementId === el.id;
@@ -588,7 +523,7 @@ export default function Canvas3D({
           ctx.shadowColor = shadowColor;
           ctx.shadowBlur = result ? blurSize * brightness : 0;
           ctx.strokeStyle = strokeStyle;
-          ctx.lineWidth = isBrace ? 3 : isPurlin ? 3.5 : 5.5;
+          ctx.lineWidth = isBrace ? 3 : isPurlin ? 3.5 : 5;
         }
 
         ctx.beginPath();
@@ -597,78 +532,35 @@ export default function Canvas3D({
         ctx.stroke();
 
         ctx.shadowBlur = 0; // Reset glow
-
-        // Draw Bending Moment 3D Shaded Ribbons
-        const resEl = result?.elements?.find((r: any) => r.id === el.id);
-        if (resEl && !isBrace && !isPurlin) {
-          const scaleMoment = 0.5; 
-          const mStart = resEl.mz_start * scaleMoment;
-          const mEnd = resEl.mz_end * scaleMoment;
-
-          const isCol = el.id.includes('Col');
-          const offsetX = isCol ? 0.35 : 0;
-          const offsetY = isCol ? 0 : 0.35;
-
-          const offsetP1 = project(
-            (n1.x + offsetX * mStart - midX) * scaleFactor,
-            (n1.y + offsetY * mStart - midY) * scaleFactor,
-            (n1.z - midZ) * scaleFactor
-          );
-          const offsetP2 = project(
-            (n2.x + offsetX * mEnd - midX) * scaleFactor,
-            (n2.y + offsetY * mEnd - midY) * scaleFactor,
-            (n2.z - midZ) * scaleFactor
-          );
-
-          ctx.fillStyle = isCol 
-            ? `hsla(0, 84%, 60%, ${brightness * 0.15})` 
-            : `hsla(142, 70%, 45%, ${brightness * 0.15})`;
-
-          ctx.strokeStyle = isCol 
-            ? `hsla(0, 84%, 60%, ${brightness * 0.7})` 
-            : `hsla(142, 70%, 45%, ${brightness * 0.7})`;
-
-          ctx.lineWidth = 1.2;
-
-          ctx.beginPath();
-          ctx.moveTo(dp1.x, dp1.y);
-          ctx.lineTo(offsetP1.x, offsetP1.y);
-          ctx.lineTo(offsetP2.x, offsetP2.y);
-          ctx.lineTo(dp2.x, dp2.y);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
-
-          if (brightness > 0.6) {
-            ctx.fillStyle = '#f8fafc';
-            ctx.font = '8px monospace';
-            if (Math.abs(resEl.mz_start) > 0.5) {
-              ctx.fillText(`${resEl.mz_start.toFixed(1)} kNm`, offsetP1.x + 5, offsetP1.y);
-            }
-          }
-        }
       });
 
-      // 4. Draw Nodal support markers & selection markers
+      // 4. Draw Nodal support markers
       nodes.forEach(n => {
         const px = project((n.x - midX) * scaleFactor, (n.y - midY) * scaleFactor, (n.z - midZ) * scaleFactor);
         const isSelected = selectedNodeId === n.id;
-        
+        const restraints = n.supportRestraints || [];
+
         ctx.shadowBlur = 0;
-        
-        if (n.support_type === 'Fixed') {
+
+        const isFixed = restraints[0] && restraints[1] && restraints[2] && restraints[3] && restraints[4] && restraints[5];
+        const isPinned = restraints[0] && restraints[1] && restraints[2] && !restraints[3] && !restraints[4] && !restraints[5];
+        const hasAnySupport = restraints.some((r: boolean) => r);
+
+        if (isFixed) {
+          // Fixed support (Red block)
           ctx.fillStyle = '#ef4444';
           ctx.beginPath();
           ctx.arc(px.x, px.y, 5, 0, Math.PI * 2);
           ctx.fill();
 
           ctx.strokeStyle = '#ef4444';
-          ctx.lineWidth = 2;
+          ctx.lineWidth = 2.5;
           ctx.beginPath();
           ctx.moveTo(px.x - 8, px.y + 4);
           ctx.lineTo(px.x + 8, px.y + 4);
           ctx.stroke();
-        } else if (n.support_type === 'Pinned') {
+        } else if (isPinned) {
+          // Pinned support (Blue triangle)
           ctx.fillStyle = '#3b82f6';
           ctx.beginPath();
           ctx.arc(px.x, px.y, 5, 0, Math.PI * 2);
@@ -682,8 +574,14 @@ export default function Canvas3D({
           ctx.lineTo(px.x, px.y);
           ctx.closePath();
           ctx.stroke();
+        } else if (hasAnySupport) {
+          // Custom supports (Orange dot)
+          ctx.fillStyle = '#f97316';
+          ctx.beginPath();
+          ctx.arc(px.x, px.y, 5, 0, Math.PI * 2);
+          ctx.fill();
         } else {
-          // Free node
+          // Free node (Purple dot)
           ctx.fillStyle = '#a855f7';
           ctx.beginPath();
           ctx.arc(px.x, px.y, 4, 0, Math.PI * 2);
@@ -728,8 +626,8 @@ export default function Canvas3D({
 
   }, [model, result, angleX, angleY, zoom, deformationScale, pulseTime, selectedElementId, selectedNodeId, dragStartNodeId, dragCurrentPos]);
 
-  const maxDisp = result && result.nodes && result.nodes.length > 0
-    ? Math.max(...result.nodes.map((rn: any) => Math.sqrt(rn.ux*rn.ux + rn.uy*rn.uy + rn.uz*rn.uz)))
+  const maxDisp = result && result.displacements
+    ? Math.max(...Object.values(result.displacements).map((disp: any) => Math.hypot(disp[0], disp[1], disp[2])))
     : 0.0;
 
   return (
@@ -769,11 +667,11 @@ export default function Canvas3D({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '11px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '10px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ color: '#64748b' }}>Liczba węzłów:</span>
-              <span style={{ color: '#fff', fontWeight: 'bold' }}>{model?.nodes?.length || model?.geometry?.nodes?.length}</span>
+              <span style={{ color: '#fff', fontWeight: 'bold' }}>{model?.geometry?.nodes?.length || model?.nodes?.length}</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ color: '#64748b' }}>Pręty ramy:</span>
-              <span style={{ color: '#fff', fontWeight: 'bold' }}>{model?.elements?.length || model?.geometry?.elements?.length}</span>
+              <span style={{ color: '#fff', fontWeight: 'bold' }}>{model?.geometry?.elements?.length || model?.elements?.length}</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ color: '#64748b' }}>Maks. ugięcie:</span>
@@ -819,16 +717,20 @@ export default function Canvas3D({
               <span style={{ color: '#64748b', fontSize: '9px' }}>Przeciążenie, ryzyko katastrofy</span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-              <span style={{ color: '#eab308', fontWeight: '600' }}>0.7 (Optymalny)</span>
-              <span style={{ color: '#64748b', fontSize: '9px' }}>Wysoka efektywność materiałowa</span>
+              <span style={{ color: '#f97316', fontWeight: '600' }}>0.8 - 1.0 (Wysokie)</span>
+              <span style={{ color: '#64748b', fontSize: '9px' }}>Blisko granicy bezpieczeństwa</span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-              <span style={{ color: '#10b981', fontWeight: '600' }}>0.3 - 0.5 (Bezpieczny)</span>
+              <span style={{ color: '#eab308', fontWeight: '600' }}>0.5 - 0.8 (Optymalne)</span>
+              <span style={{ color: '#64748b', fontSize: '9px' }}>Efektywność materiałowa</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              <span style={{ color: '#10b981', fontWeight: '600' }}>0.2 - 0.5 (Bezpieczne)</span>
               <span style={{ color: '#64748b', fontSize: '9px' }}>Duży zapas nośności</span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
-              <span style={{ color: '#3b82f6', fontWeight: '600' }}>0.0 (Brak obciążenia)</span>
-              <span style={{ color: '#64748b', fontSize: '9px' }}>Stan bezprężeniowy</span>
+              <span style={{ color: '#3b82f6', fontWeight: '600' }}>0.0 - 0.2 (Niskie)</span>
+              <span style={{ color: '#64748b', fontSize: '9px' }}>Brak obciążenia / niski napręż</span>
             </div>
           </div>
         </div>

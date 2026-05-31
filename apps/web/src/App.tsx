@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Canvas2D, { type ResultPoint } from './components/Canvas2D';
 import Canvas3D from './components/Canvas3D';
-import { Layers, Box } from 'lucide-react';
+import { Layers, Box, Trash2 } from 'lucide-react';
 import { generateSteelReport, generateConcreteReport } from './utils/latexGenerator';
 
 // =============================================================================
@@ -210,6 +210,7 @@ export default function App() {
   const [results3D, setResults3D] = useState<any | null>(null);
   const [inputModel3D, setInputModel3D] = useState<any | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<{type: 'node' | 'element', id: string} | null>(null);
+  const [workMode3D, setWorkMode3D] = useState<'parametric' | 'free_cad'>('parametric');
 
   // Initialize WASM
   useEffect(() => {
@@ -473,28 +474,25 @@ export default function App() {
   const generateParametricModel3D = useCallback((width: number, height: number, alpha: number, bayLength: number, bays: number) => {
     const nodes: any[] = [];
     const elements: any[] = [];
-    const loads: any[] = [];
 
     const alpha_rad = (alpha * Math.PI) / 180;
     const H_ridge = height + Math.tan(alpha_rad) * (width / 2);
 
-    // Generate nodes
+    // Generate nodes with V2 supportRestraints [Tx, Ty, Tz, Rx, Ry, Rz]
     for (let b = 0; b <= bays; b++) {
       const z = b * bayLength;
-      // Left column base
-      nodes.push({ id: `N_base_L_${b}`, x: -width/2, y: 0, z, support_type: 'Fixed' });
-      // Right column base
-      nodes.push({ id: `N_base_R_${b}`, x: width/2, y: 0, z, support_type: 'Fixed' });
-      // Left column top (eaves)
-      nodes.push({ id: `N_eaves_L_${b}`, x: -width/2, y: height, z, support_type: 'Free' });
-      // Right column top (eaves)
-      nodes.push({ id: `N_eaves_R_${b}`, x: width/2, y: height, z, support_type: 'Free' });
-      // Ridge node (roof top center)
-      nodes.push({ id: `N_ridge_${b}`, x: 0, y: H_ridge, z, support_type: 'Free' });
+      // Fixed column bases
+      nodes.push({ id: `N_base_L_${b}`, x: -width/2, y: 0, z, supportRestraints: [true, true, true, true, true, true] });
+      nodes.push({ id: `N_base_R_${b}`, x: width/2, y: 0, z, supportRestraints: [true, true, true, true, true, true] });
+      // Free eaves/ridge nodes
+      nodes.push({ id: `N_eaves_L_${b}`, x: -width/2, y: height, z, supportRestraints: [false, false, false, false, false, false] });
+      nodes.push({ id: `N_eaves_R_${b}`, x: width/2, y: height, z, supportRestraints: [false, false, false, false, false, false] });
+      nodes.push({ id: `N_ridge_${b}`, x: 0, y: H_ridge, z, supportRestraints: [false, false, false, false, false, false] });
     }
 
     const E = 210e9;
     const G = 80e9;
+    const J = 1.0e-8; // Default torsion constant
 
     const colProps = STEEL_PROFILES_3D[columnSection] || STEEL_PROFILES_3D['HEB200'];
     const rafProps = STEEL_PROFILES_3D[rafterSection] || STEEL_PROFILES_3D['IPE220'];
@@ -503,22 +501,22 @@ export default function App() {
     for (let b = 0; b <= bays; b++) {
       // Columns
       elements.push({ 
-        id: `Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b}`, 
-        e: E, g: G, ...colProps, group: "columns", group_id: "columns" 
+        id: `Col_L_${b}`, startNode: `N_base_L_${b}`, endNode: `N_eaves_L_${b}`, 
+        e: E, g: G, ...colProps, j: colProps.j || J, groupId: "columns" 
       });
       elements.push({ 
-        id: `Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b}`, 
-        e: E, g: G, ...colProps, group: "columns", group_id: "columns" 
+        id: `Col_R_${b}`, startNode: `N_base_R_${b}`, endNode: `N_eaves_R_${b}`, 
+        e: E, g: G, ...colProps, j: colProps.j || J, groupId: "columns" 
       });
       
       // Rafters
       elements.push({ 
-        id: `Raf_L_${b}`, start_node_id: `N_eaves_L_${b}`, end_node_id: `N_ridge_${b}`, 
-        e: E, g: G, ...rafProps, group: "rafters", group_id: "rafters" 
+        id: `Raf_L_${b}`, startNode: `N_eaves_L_${b}`, endNode: `N_ridge_${b}`, 
+        e: E, g: G, ...rafProps, j: rafProps.j || J, groupId: "rafters" 
       });
       elements.push({ 
-        id: `Raf_R_${b}`, start_node_id: `N_ridge_${b}`, end_node_id: `N_eaves_R_${b}`, 
-        e: E, g: G, ...rafProps, group: "rafters", group_id: "rafters" 
+        id: `Raf_R_${b}`, startNode: `N_ridge_${b}`, endNode: `N_eaves_R_${b}`, 
+        e: E, g: G, ...rafProps, j: rafProps.j || J, groupId: "rafters" 
       });
     }
 
@@ -526,73 +524,48 @@ export default function App() {
     for (let b = 0; b < bays; b++) {
       // Eaves girts
       elements.push({ 
-        id: `Girt_L_${b}`, start_node_id: `N_eaves_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, 
-        e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+        id: `Girt_L_${b}`, startNode: `N_eaves_L_${b}`, endNode: `N_eaves_L_${b+1}`, 
+        e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
       });
       elements.push({ 
-        id: `Girt_R_${b}`, start_node_id: `N_eaves_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, 
-        e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+        id: `Girt_R_${b}`, startNode: `N_eaves_R_${b}`, endNode: `N_eaves_R_${b+1}`, 
+        e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
       });
       
       // Ridge purlins
       elements.push({ 
-        id: `Purlin_R_${b}`, start_node_id: `N_ridge_${b}`, end_node_id: `N_ridge_${b+1}`, 
-        e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+        id: `Purlin_R_${b}`, startNode: `N_ridge_${b}`, endNode: `N_ridge_${b+1}`, 
+        e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
       });
 
       // X-bracing in the first and last bays (diagonal members)
       if (b === 0 || b === bays - 1) {
         elements.push({ 
-          id: `Brace_Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, 
-          e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+          id: `Brace_Col_L_${b}`, startNode: `N_base_L_${b}`, endNode: `N_eaves_L_${b+1}`, 
+          e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
         });
         elements.push({ 
-          id: `Brace_Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, 
-          e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+          id: `Brace_Col_R_${b}`, startNode: `N_base_R_${b}`, endNode: `N_eaves_R_${b+1}`, 
+          e: E, g: G, ...braceProps, j: braceProps.j || J, groupId: "bracings" 
         });
       }
-    }
-
-    // Apply some sample loads
-    for (let b = 0; b <= bays; b++) {
-      loads.push({
-        node_id: `N_ridge_${b}`,
-        fx: 0.0,
-        fy: -25000.0, // -25 kN downward
-        fz: 0.0,
-        mx: 0.0,
-        my: 0.0,
-        mz: 0.0,
-      });
-      loads.push({
-        node_id: `N_eaves_L_${b}`,
-        fx: 12000.0, // 12 kN lateral wind
-        fy: 0.0,
-        fz: 0.0,
-        mx: 0.0,
-        my: 0.0,
-        mz: 0.0,
-      });
     }
 
     const distributed_loads: any[] = [];
     for (let b = 0; b <= bays; b++) {
       distributed_loads.push({
-        element_id: `Raf_L_${b}`,
-        value: -1200.0, // -1.2 kN/m vertical distributed load
+        elementId: `Raf_L_${b}`,
+        value: -1200.0, // N/m vertical distributed load
       });
       distributed_loads.push({
-        element_id: `Raf_R_${b}`,
-        value: -1200.0, // -1.2 kN/m vertical distributed load
+        elementId: `Raf_R_${b}`,
+        value: -1200.0,
       });
     }
 
     return {
-      nodes,
-      elements,
       geometry: { nodes, elements },
-      loads,
-      distributed_loads
+      loads: distributed_loads
     };
   }, [columnSection, rafterSection, bracingSection]);
 
@@ -611,31 +584,34 @@ export default function App() {
         console.error('[StructurAI] 3D Solver error:', output?.error);
       }
     } else {
-      const mockResultNodes = modelToSolve.nodes.map((n: any) => {
+      // Mock / fallback solver
+      const mockResultDisplacements: Record<string, number[]> = {};
+      const mockResultReactions: Record<string, number[]> = {};
+      const mockResultUtilization: Record<string, number[]> = {};
+
+      modelToSolve.geometry.nodes.forEach((n: any) => {
         const isRidge = n.id.includes('ridge');
         const isEaves = n.id.includes('eaves');
-        return {
-          id: n.id,
-          ux: isEaves ? 12.5 : 0.0,
-          uy: isRidge ? -18.2 : isEaves ? -8.4 : 0.0,
-          uz: 0.0,
-          rx: 0.0,
-          ry: 0.0,
-          rz: 0.0,
-        };
+        mockResultDisplacements[n.id] = [
+          isEaves ? 12.5 : 0.0,
+          isRidge ? -18.2 : isEaves ? -8.4 : 0.0,
+          0.0, 0.0, 0.0, 0.0
+        ];
+        mockResultReactions[n.id] = [0.0, 15.0, 0.0, 0.0, 0.0, 0.0];
       });
-      const mockResultElements = modelToSolve.elements.map((el: any) => {
-        return {
-          id: el.id,
-          fx_start: 0, fy_start: 0, fz_start: 0, mx_start: 0, my_start: 0, mz_start: el.id.includes('Col') ? -15.4 : -32.5,
-          fx_end: 0, fy_end: 0, fz_end: 0, mx_end: 0, my_end: 0, mz_end: el.id.includes('Col') ? 32.5 : 15.4,
-        };
+
+      modelToSolve.geometry.elements.forEach((el: any) => {
+        mockResultUtilization[el.id] = el.id.includes('Col') 
+          ? [0.15, 0.22, 0.35, 0.44, 0.48]
+          : [0.30, 0.55, 0.72, 0.61, 0.40];
       });
+
       setResults3D({
         success: true,
         error: null,
-        nodes: mockResultNodes,
-        elements: mockResultElements,
+        displacements: mockResultDisplacements,
+        reactions: mockResultReactions,
+        utilization: mockResultUtilization,
         model: modelToSolve,
       });
     }
@@ -658,27 +634,44 @@ export default function App() {
     }
   }, [appMode, inputModel3D]);
 
-  // Node editing handlers
-  const updateNodeCoordinate = (nodeId: string, axis: 'x' | 'y' | 'z', val: number) => {
-    if (!inputModel3D) return;
-    const updatedNodes = inputModel3D.nodes.map((n: any) => {
-      if (n.id === nodeId) {
-        return { ...n, [axis]: val };
-      }
-      return n;
-    });
-    setInputModel3D({ ...inputModel3D, nodes: updatedNodes });
+  // Safe entity lookup helpers
+  const getNode = (id: string) => {
+    return inputModel3D?.geometry?.nodes.find((n: any) => n.id === id) || { x: 0, y: 0, z: 0, supportRestraints: [false, false, false, false, false, false] };
   };
 
-  const updateNodeSupport = (nodeId: string, supportType: 'Fixed' | 'Pinned' | 'Free') => {
+  const getElement = (id: string) => {
+    return inputModel3D?.geometry?.elements.find((el: any) => el.id === id) || { sectionId: 'IPE220' };
+  };
+
+  // Node editing handlers
+  const updateNodeCoord = (nodeId: string, axis: 'x' | 'y' | 'z', val: number) => {
     if (!inputModel3D) return;
-    const updatedNodes = inputModel3D.nodes.map((n: any) => {
+    const updatedNodes = inputModel3D.geometry.nodes.map((n: any) => {
       if (n.id === nodeId) {
-        return { ...n, support_type: supportType };
+        return { ...n, [axis]: val || 0.0 };
       }
       return n;
     });
-    setInputModel3D({ ...inputModel3D, nodes: updatedNodes });
+    setInputModel3D({
+      ...inputModel3D,
+      geometry: { ...inputModel3D.geometry, nodes: updatedNodes }
+    });
+  };
+
+  const toggleRestraint = (nodeId: string, restraintIdx: number) => {
+    if (!inputModel3D) return;
+    const updatedNodes = inputModel3D.geometry.nodes.map((n: any) => {
+      if (n.id === nodeId) {
+        const restraints = [...(n.supportRestraints || [false, false, false, false, false, false])];
+        restraints[restraintIdx] = !restraints[restraintIdx];
+        return { ...n, supportRestraints: restraints };
+      }
+      return n;
+    });
+    setInputModel3D({
+      ...inputModel3D,
+      geometry: { ...inputModel3D.geometry, nodes: updatedNodes }
+    });
   };
 
   // Element profile editing handler
@@ -686,48 +679,36 @@ export default function App() {
     if (!inputModel3D) return;
     const profileProps = STEEL_PROFILES_3D[profileKey];
     if (!profileProps) return;
-    const updatedElements = inputModel3D.elements.map((el: any) => {
+    const updatedElements = inputModel3D.geometry.elements.map((el: any) => {
       if (el.id === elementId) {
-        return { ...el, ...profileProps, sectionName: profileKey };
+        return { ...el, ...profileProps, sectionId: profileKey };
       }
       return el;
     });
-    setInputModel3D({ ...inputModel3D, elements: updatedElements });
+    setInputModel3D({
+      ...inputModel3D,
+      geometry: { ...inputModel3D.geometry, elements: updatedElements }
+    });
   };
 
   // Delete element or node and its connections
-  const deleteSelectedEntity = () => {
-    if (!selectedEntity || !inputModel3D) return;
-    const { type, id } = selectedEntity;
-    
-    if (type === 'node') {
-      const updatedNodes = inputModel3D.nodes.filter((n: any) => n.id !== id);
-      const updatedElements = inputModel3D.elements.filter(
-        (el: any) => el.start_node_id !== id && el.end_node_id !== id
-      );
-      setInputModel3D({
-        ...inputModel3D,
-        nodes: updatedNodes,
-        elements: updatedElements
-      });
-    } else if (type === 'element') {
-      const updatedElements = inputModel3D.elements.filter((el: any) => el.id !== id);
-      setInputModel3D({
-        ...inputModel3D,
-        elements: updatedElements
-      });
-    }
-    
+  const removeElement = (elementId: string) => {
+    if (!inputModel3D) return;
+    const updatedElements = inputModel3D.geometry.elements.filter((el: any) => el.id !== elementId);
+    setInputModel3D({
+      ...inputModel3D,
+      geometry: { ...inputModel3D.geometry, elements: updatedElements }
+    });
     setSelectedEntity(null);
   };
 
   // Drag and draw element insertion callback
   const handleAddElement3D = (startNodeId: string, endNodeId: string) => {
     if (!inputModel3D) return;
-    const exists = inputModel3D.elements.some(
+    const exists = inputModel3D.geometry.elements.some(
       (el: any) => 
-        (el.start_node_id === startNodeId && el.end_node_id === endNodeId) ||
-        (el.start_node_id === endNodeId && el.end_node_id === startNodeId)
+        (el.startNode === startNodeId && el.endNode === endNodeId) ||
+        (el.startNode === endNodeId && el.endNode === startNodeId)
     );
     if (exists) return;
 
@@ -735,17 +716,22 @@ export default function App() {
     const defaultProps = STEEL_PROFILES_3D[rafterSection] || STEEL_PROFILES_3D['IPE220'];
     const newElement = {
       id: newId,
-      start_node_id: startNodeId,
-      end_node_id: endNodeId,
+      startNode: startNodeId,
+      endNode: endNodeId,
       e: 210e9,
       g: 80e9,
       ...defaultProps,
-      sectionName: rafterSection
+      j: defaultProps.j || 1.0e-8,
+      sectionId: rafterSection,
+      groupId: "rafters"
     };
 
     setInputModel3D({
       ...inputModel3D,
-      elements: [...inputModel3D.elements, newElement]
+      geometry: {
+        ...inputModel3D.geometry,
+        elements: [...inputModel3D.geometry.elements, newElement]
+      }
     });
   };
 
@@ -1047,7 +1033,7 @@ export default function App() {
               deformationScale={deformationScale} 
               activeTool={activeTool}
               selectedEntity={selectedEntity}
-              onSelectEntity={(type, id) => setSelectedEntity(type && id ? { type, id } : null)}
+              onSelectEntity={setSelectedEntity}
               onAddElement3D={handleAddElement3D}
             />
           ) : !results ? (
@@ -1078,1021 +1064,990 @@ export default function App() {
         {/* ----- Right Properties Panel ----- */}
         <aside className="properties-panel">
           <div className="properties-panel__header">
-            <span className="properties-panel__title">Parametry</span>
+            <span className="properties-panel__title">
+              {appMode === '3d' ? 'Tryb Projektowy 3D Pro' : 'Parametry Konstrukcji'}
+            </span>
+            {appMode === '3d' && (
+              <span style={{
+                background: 'linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%)',
+                color: '#fff',
+                fontSize: '10px',
+                fontWeight: 'bold',
+                padding: '2px 8px',
+                borderRadius: '9999px',
+                boxShadow: '0 0 8px rgba(139, 92, 246, 0.4)'
+              }}>
+                6-DOF
+              </span>
+            )}
           </div>
 
-          {/* Material / Design Toggle (Faza 3) */}
-          <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-            <button
-              onClick={() => setDesignType('steel')}
-              style={{
-                flex: 1,
-                padding: '12px',
-                background: designType === 'steel' ? 'rgba(59, 130, 246, 0.15)' : 'transparent',
-                border: 'none',
-                borderBottom: designType === 'steel' ? '2px solid #3b82f6' : '2px solid transparent',
-                color: designType === 'steel' ? '#3b82f6' : '#94a3b8',
-                fontWeight: 'bold',
-                fontSize: '13px',
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-              }}
-              id="toggle-design-steel"
-            >
-              🏗 Stal (Optymalizacja)
-            </button>
-            <button
-              onClick={() => setDesignType('concrete')}
-              style={{
-                flex: 1,
-                padding: '12px',
-                background: designType === 'concrete' ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
-                border: 'none',
-                borderBottom: designType === 'concrete' ? '2px solid #10b981' : '2px solid transparent',
-                color: designType === 'concrete' ? '#10b981' : '#94a3b8',
-                fontWeight: 'bold',
-                fontSize: '13px',
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-              }}
-              id="toggle-design-concrete"
-            >
-              🧱 Żelbet (EC2)
-            </button>
-          </div>
+          {appMode === '2d' ? (
+            <>
+              {/* Material / Design Toggle (Faza 3) */}
+              <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                <button
+                  onClick={() => setDesignType('steel')}
+                  style={{
+                    flex: 1,
+                    padding: '12px',
+                    background: designType === 'steel' ? 'rgba(59, 130, 246, 0.15)' : 'transparent',
+                    border: 'none',
+                    borderBottom: designType === 'steel' ? '2px solid #3b82f6' : '2px solid transparent',
+                    color: designType === 'steel' ? '#3b82f6' : '#94a3b8',
+                    fontWeight: 'bold',
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                  id="toggle-design-steel"
+                >
+                  🏗 Stal (Optymalizacja)
+                </button>
+                <button
+                  onClick={() => setDesignType('concrete')}
+                  style={{
+                    flex: 1,
+                    padding: '12px',
+                    background: designType === 'concrete' ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
+                    border: 'none',
+                    borderBottom: designType === 'concrete' ? '2px solid #10b981' : '2px solid transparent',
+                    color: designType === 'concrete' ? '#10b981' : '#94a3b8',
+                    fontWeight: 'bold',
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                  id="toggle-design-concrete"
+                >
+                  🧱 Żelbet (EC2)
+                </button>
+              </div>
 
-          {appMode === '3d' ? (
-            <div style={{ padding: '16px', color: '#94a3b8' }}>
-              {/* Dynamic properties section of selected entity */}
-              {selectedEntity && (() => {
-                const { type, id } = selectedEntity;
-                if (type === 'node') {
-                  const node = inputModel3D?.nodes.find((n: any) => n.id === id);
-                  if (!node) return null;
-                  return (
-                    <div style={{
-                      background: 'rgba(59, 130, 246, 0.08)',
-                      border: '1px solid rgba(59, 130, 246, 0.25)',
-                      borderRadius: '8px',
-                      padding: '16px',
-                      marginBottom: '16px'
-                    }}>
-                      <h3 style={{ margin: '0 0 12px 0', fontSize: '13px', color: '#60a5fa', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span>📍 Węzeł: {id}</span>
-                        <button 
-                          onClick={deleteSelectedEntity}
-                          style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid #ef4444', color: '#ef4444', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}
-                        >
-                          USUŃ
-                        </button>
-                      </h3>
-                      
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        <div>
-                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '4px' }}>Współrzędna X [m]</label>
-                          <input 
-                            type="number" 
-                            step="0.5" 
-                            value={node.x} 
-                            onChange={(e) => updateNodeCoordinate(id, 'x', parseFloat(e.target.value) || 0)}
-                            style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px' }}
-                          />
-                        </div>
-                        <div>
-                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '4px' }}>Współrzędna Y [m]</label>
-                          <input 
-                            type="number" 
-                            step="0.5" 
-                            value={node.y} 
-                            onChange={(e) => updateNodeCoordinate(id, 'y', parseFloat(e.target.value) || 0)}
-                            style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px' }}
-                          />
-                        </div>
-                        <div>
-                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '4px' }}>Współrzędna Z [m]</label>
-                          <input 
-                            type="number" 
-                            step="0.5" 
-                            value={node.z} 
-                            onChange={(e) => updateNodeCoordinate(id, 'z', parseFloat(e.target.value) || 0)}
-                            style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px' }}
-                          />
-                        </div>
-                        <div>
-                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '6px' }}>Typ podpory</label>
-                          <div style={{ display: 'flex', gap: '4px' }}>
-                            {['Fixed', 'Pinned', 'Free'].map((t) => (
-                              <button
-                                key={t}
-                                onClick={() => updateNodeSupport(id, t as any)}
-                                style={{
-                                  flex: 1,
-                                  padding: '4px 0',
-                                  fontSize: '10.5px',
-                                  borderRadius: '4px',
-                                  border: '1px solid rgba(255,255,255,0.1)',
-                                  background: node.support_type === t ? '#3b82f6' : 'rgba(0,0,0,0.3)',
-                                  color: '#fff',
-                                  cursor: 'pointer'
-                                }}
-                              >
-                                {t === 'Fixed' ? 'Utwierdzenie' : t === 'Pinned' ? 'Przegub' : 'Brak'}
-                              </button>
-                            ))}
+              {designType === 'steel' ? (
+                <>
+                  {/* Sekcja: Geometria */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Geometria Przęsła</div>
+                    <div className="param-group" style={{ marginTop: '10px' }}>
+                      <label className="param-label" htmlFor="param-length">Długość całkowita belki (L) [m]</label>
+                      <div className="param-input-group">
+                        <input 
+                          id="param-length"
+                          type="range" 
+                          min="1.0" 
+                          max="20.0" 
+                          step="0.5" 
+                          value={beamLength}
+                          onChange={(e) => setBeamLength(parseFloat(e.target.value))}
+                          className="param-range"
+                        />
+                        <span className="param-value mono-value">{beamLength.toFixed(1)}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Supports */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>Podpory belki</span>
+                      <button 
+                        className="btn btn--primary" 
+                        onClick={() => addSupport()} 
+                        style={{ padding: '2px 8px', fontSize: '11px', height: 'auto', borderRadius: '4px' }}
+                        disabled={supports.length >= 8}
+                      >
+                        + Dodaj
+                      </button>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+                      {supports.map((s, idx) => {
+                        const isStart = idx === 0;
+                        const isEnd = idx === supports.length - 1;
+                        const isEdge = isStart || isEnd;
+                        return (
+                          <div key={s.id} style={{ 
+                            background: 'rgba(255,255,255,0.03)', 
+                            padding: '8px 12px', 
+                            borderRadius: '8px', 
+                            border: '1px solid rgba(255,255,255,0.06)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '4px'
+                          }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#94a3b8' }}>
+                                Węzeł N{idx + 1} ({isStart ? 'Start' : isEnd ? 'Koniec' : `x = ${s.x.toFixed(1)}m`})
+                              </span>
+                              {supports.length > 2 && (
+                                <button 
+                                  onClick={() => removeSupport(s.id)}
+                                  style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '12px', cursor: 'pointer', padding: 0, fontWeight: 'bold' }}
+                                  title="Usuń węzeł"
+                                >
+                                  ✕
+                                </button>
+                              )}
+                            </div>
+
+                            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '4px' }}>
+                              {!isEdge && (
+                                <input
+                                  type="range"
+                                  min="0.5"
+                                  max={beamLength - 0.5}
+                                  step="0.1"
+                                  value={s.x}
+                                  onChange={(e) => updateSupportX(s.id, parseFloat(e.target.value))}
+                                  style={{ flex: 1, accentColor: '#3b82f6', height: '4px' }}
+                                />
+                              )}
+                              
+                              <div style={{ display: 'flex', gap: '4px', flex: isEdge ? 1 : 'unset', justifyContent: isEdge ? 'flex-end' : 'flex-start' }}>
+                                <button
+                                  onClick={() => updateSupportType(s.id, 'Roller')}
+                                  style={{
+                                    padding: '2px 8px',
+                                    fontSize: '11px',
+                                    borderRadius: '4px',
+                                    border: '1px solid rgba(255,255,255,0.1)',
+                                    background: s.type === 'Roller' ? '#2563eb' : 'rgba(0,0,0,0.3)',
+                                    color: '#fff',
+                                    cursor: 'pointer'
+                                  }}
+                                >
+                                  Przesuwna
+                                </button>
+                                <button
+                                  onClick={() => updateSupportType(s.id, 'Pinned')}
+                                  style={{
+                                    padding: '2px 8px',
+                                    fontSize: '11px',
+                                    borderRadius: '4px',
+                                    border: '1px solid rgba(255,255,255,0.1)',
+                                    background: s.type === 'Pinned' ? '#2563eb' : 'rgba(0,0,0,0.3)',
+                                    color: '#fff',
+                                    cursor: 'pointer'
+                                  }}
+                                >
+                                  Stała
+                                </button>
+                                <button
+                                  onClick={() => updateSupportType(s.id, 'Fixed')}
+                                  style={{
+                                    padding: '2px 8px',
+                                    fontSize: '11px',
+                                    borderRadius: '4px',
+                                    border: '1px solid rgba(255,255,255,0.1)',
+                                    background: s.type === 'Fixed' ? '#2563eb' : 'rgba(0,0,0,0.3)',
+                                    color: '#fff',
+                                    cursor: 'pointer'
+                                  }}
+                                >
+                                  Utwierdzenie
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Point Loads */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>Siły skupione</span>
+                      <button 
+                        className="btn btn--primary" 
+                        onClick={() => addPointLoad()} 
+                        style={{ padding: '2px 8px', fontSize: '11px', height: 'auto', borderRadius: '4px' }}
+                        disabled={pointLoads.length >= 5}
+                      >
+                        + Dodaj
+                      </button>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+                      {pointLoads.map((pl, idx) => (
+                        <div key={pl.id} style={{ 
+                          background: 'rgba(255,255,255,0.03)', 
+                          padding: '8px 12px', 
+                          borderRadius: '8px', 
+                          border: '1px solid rgba(255,255,255,0.06)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '6px'
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#94a3b8' }}>
+                              F{idx + 1} (x = {pl.x.toFixed(1)}m)
+                            </span>
+                            <button 
+                              onClick={() => removePointLoad(pl.id)}
+                              style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '12px', cursor: 'pointer', padding: 0 }}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                            <input
+                              type="range"
+                              min="0.1"
+                              max={beamLength - 0.1}
+                              step="0.1"
+                              value={pl.x}
+                              onChange={(e) => updatePointLoadX(pl.id, parseFloat(e.target.value))}
+                              style={{ flex: 1, accentColor: '#3b82f6', height: '4px' }}
+                            />
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                              <input 
+                                type="number" 
+                                value={pl.value} 
+                                onChange={(e) => updatePointLoadVal(pl.id, parseFloat(e.target.value) || 0)}
+                                style={{ width: '50px', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '2px 4px', borderRadius: '4px', fontSize: '11px', textAlign: 'center' }}
+                              />
+                              <span style={{ fontSize: '10px', color: '#64748b' }}>kN</span>
+                            </div>
                           </div>
                         </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Distributed Load */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Obciążenie ciągłe (q)</div>
+                    <div className="param-group" style={{ marginTop: '10px' }}>
+                      <div className="param-input-group">
+                        <input 
+                          type="range" 
+                          min="0.0" 
+                          max="50.0" 
+                          step="1.0" 
+                          value={loadValue}
+                          onChange={(e) => setLoadValue(parseFloat(e.target.value))}
+                          className="param-range"
+                        />
+                        <span className="param-value mono-value">{loadValue.toFixed(1)} kN/m</span>
                       </div>
                     </div>
-                  );
-                } else if (type === 'element') {
-                  const element = inputModel3D?.elements.find((e: any) => e.id === id);
-                  if (!element) return null;
-                  
-                  const currentSection = element.sectionName || 
-                    Object.keys(STEEL_PROFILES_3D).find(k => STEEL_PROFILES_3D[k].area === element.area) || 
-                    'IPE220';
-                    
-                  return (
-                    <div style={{
-                      background: 'rgba(139, 92, 246, 0.08)',
-                      border: '1px solid rgba(139, 92, 246, 0.25)',
-                      borderRadius: '8px',
-                      padding: '16px',
-                      marginBottom: '16px'
-                    }}>
-                      <h3 style={{ margin: '0 0 12px 0', fontSize: '13px', color: '#a78bfa', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span>🔩 Pręt: {id}</span>
-                        <button 
-                          onClick={deleteSelectedEntity}
-                          style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid #ef4444', color: '#ef4444', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}
-                        >
-                          USUŃ
-                        </button>
-                      </h3>
-                      
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        <div style={{ fontSize: '11px', color: '#94a3b8' }}>
-                          Połączenie: <strong style={{ color: '#fff' }}>{element.start_node_id}</strong> &rarr; <strong style={{ color: '#fff' }}>{element.end_node_id}</strong>
-                        </div>
-                        
-                        <div>
-                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '6px' }}>Profil stalowy pręta</label>
-                          <select
-                            value={currentSection}
-                            onChange={(e) => updateElementProfile(id, e.target.value)}
-                            style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px 8px' }}
+                  </div>
+
+                  {/* Steel Profile */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Profil Stalowy</div>
+                    <select
+                      value={sectionId}
+                      onChange={(e) => setSectionId(e.target.value)}
+                      className="param-select"
+                      style={{ marginTop: '10px' }}
+                    >
+                      <option value="IPE200">IPE 200</option>
+                      <option value="IPE300">IPE 300</option>
+                      <option value="IPE400">IPE 400</option>
+                      <option value="HEB200">HEB 200</option>
+                      <option value="HEB300">HEB 300</option>
+                    </select>
+                  </div>
+
+                  {/* AI Section Recommendation */}
+                  {optResults && optResults.success && (
+                    <div className="properties-panel__section">
+                      <div className="properties-panel__section-title">Optymalizator Generatywny</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+                        {optResults.cheapest && (
+                          <div 
+                            onClick={() => setSectionId(optResults.cheapest!.name.replace(' ', ''))}
+                            style={{ 
+                              background: sectionId === optResults.cheapest.name.replace(' ', '') ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255,255,255,0.02)', 
+                              border: sectionId === optResults.cheapest.name.replace(' ', '') ? '1px solid #10b981' : '1px solid rgba(255,255,255,0.06)',
+                              padding: '10px 12px',
+                              borderRadius: '8px',
+                              cursor: 'pointer',
+                              transition: 'all 0.15s ease'
+                            }}
+                            className="opt-card"
                           >
-                            <optgroup label="IPE Profiles">
-                              <option value="IPE100">IPE 100</option>
-                              <option value="IPE120">IPE 120</option>
-                              <option value="IPE140">IPE 140</option>
-                              <option value="IPE160">IPE 160</option>
-                              <option value="IPE180">IPE 180</option>
-                              <option value="IPE200">IPE 200</option>
-                              <option value="IPE220">IPE 220</option>
-                              <option value="IPE240">IPE 240</option>
-                              <option value="IPE270">IPE 270</option>
-                              <option value="IPE300">IPE 300</option>
-                              <option value="IPE330">IPE 330</option>
-                              <option value="IPE360">IPE 360</option>
-                              <option value="IPE400">IPE 400</option>
-                            </optgroup>
-                            <optgroup label="HEB Profiles">
-                              <option value="HEB100">HEB 100</option>
-                              <option value="HEB120">HEB 120</option>
-                              <option value="HEB140">HEB 140</option>
-                              <option value="HEB160">HEB 160</option>
-                              <option value="HEB180">HEB 180</option>
-                              <option value="HEB200">HEB 200</option>
-                              <option value="HEB220">HEB 220</option>
-                              <option value="HEB240">HEB 240</option>
-                              <option value="HEB260">HEB 260</option>
-                              <option value="HEB280">HEB 280</option>
-                              <option value="HEB300">HEB 300</option>
-                            </optgroup>
-                          </select>
-                        </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#10b981' }}>🟢 Najtańszy profil</span>
+                              <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.cheapest.weight.toFixed(1)} kg/m</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                              <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.cheapest.name}</span>
+                              <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.cheapest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
+                                Wytężenie: {(optResults.cheapest.utilization_sgn * 100).toFixed(0)}%
+                              </span>
+                            </div>
+                            <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                              Ugięcie: {optResults.cheapest.deflection_sgu.toFixed(1)} mm / {optResults.cheapest.limit_sgu.toFixed(1)} mm
+                            </div>
+                          </div>
+                        )}
+
+                        {optResults.lightest && (
+                          <div 
+                            onClick={() => setSectionId(optResults.lightest!.name.replace(' ', ''))}
+                            style={{ 
+                              background: sectionId === optResults.lightest.name.replace(' ', '') ? 'rgba(6, 182, 212, 0.12)' : 'rgba(255,255,255,0.02)', 
+                              border: sectionId === optResults.lightest.name.replace(' ', '') ? '1px solid #06b6d4' : '1px solid rgba(255,255,255,0.06)',
+                              padding: '10px 12px',
+                              borderRadius: '8px',
+                              cursor: 'pointer',
+                              transition: 'all 0.15s ease'
+                            }}
+                            className="opt-card"
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#06b6d4' }}>⚡ Najlżejszy profil (Eco)</span>
+                              <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.lightest.weight.toFixed(1)} kg/m</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                              <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.lightest.name}</span>
+                              <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.lightest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
+                                Wytężenie: {(optResults.lightest.utilization_sgn * 100).toFixed(0)}%
+                              </span>
+                            </div>
+                            <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                              Ugięcie: {optResults.lightest.deflection_sgu.toFixed(1)} mm / {optResults.lightest.limit_sgu.toFixed(1)} mm
+                            </div>
+                          </div>
+                        )}
+
+                        {optResults.balanced && (
+                          <div 
+                            onClick={() => setSectionId(optResults.balanced!.name.replace(' ', ''))}
+                            style={{ 
+                              background: sectionId === optResults.balanced.name.replace(' ', '') ? 'rgba(139, 92, 246, 0.12)' : 'rgba(255,255,255,0.02)', 
+                              border: sectionId === optResults.balanced.name.replace(' ', '') ? '1px solid #8b5cf6' : '1px solid rgba(255,255,255,0.06)',
+                              padding: '10px 12px',
+                              borderRadius: '8px',
+                              cursor: 'pointer',
+                              transition: 'all 0.15s ease'
+                            }}
+                            className="opt-card"
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b5cf6' }}>⚖ Zrównoważony profil (60-70%)</span>
+                              <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.balanced.weight.toFixed(1)} kg/m</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                              <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.balanced.name}</span>
+                              <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#8b5cf6' }}>
+                                Wytężenie: {(optResults.balanced.utilization_sgn * 100).toFixed(0)}%
+                              </span>
+                            </div>
+                            <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                              Ugięcie: {optResults.balanced.deflection_sgu.toFixed(1)} mm / {optResults.balanced.limit_sgu.toFixed(1)} mm
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
-                  );
-                }
-                return null;
-              })()}
-
-              {/* Generator Info Widget */}
-              <div style={{
-                background: 'rgba(139, 92, 246, 0.1)',
-                border: '1px solid rgba(139, 92, 246, 0.2)',
-                borderRadius: '8px',
-                padding: '16px',
-                marginBottom: '16px'
-              }}>
-                <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#c4b5fd', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <Box size={16} /> Parametry Ramy 3D Pro
-                </h3>
-                <p style={{ margin: '0 0 16px 0', fontSize: '12px', lineHeight: 1.5 }}>
-                  Parametryczny generator hal stalowych o 6 stopniach swobody (DOF) na węzeł. Modyfikuj parametry, aby wyliczyć siły w czasie rzeczywistym.
-                </p>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                    <span>Aktywny solver</span>
-                    <span style={{ color: '#8b5cf6', fontWeight: 'bold' }}>solve_mesh_3d</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                    <span>Stopnie swobody (DOF)</span>
-                    <span style={{ color: '#fff' }}>6 na węzeł</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Sliders Area */}
-              <div className="panel-section" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <h3 className="panel-heading">Geometria Przestrzenna</h3>
-
-                {/* Width B */}
-                <div className="param-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                    <label className="param-label" style={{ margin: 0 }}>Szerokość hali B [m]</label>
-                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{width3D.toFixed(1)} m</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="4.0"
-                    max="20.0"
-                    step="0.5"
-                    value={width3D}
-                    onChange={(e) => setWidth3D(parseFloat(e.target.value))}
-                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
-                  />
-                </div>
-
-                {/* Height H */}
-                <div className="param-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                    <label className="param-label" style={{ margin: 0 }}>Wysokość słupa H [m]</label>
-                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{height3D.toFixed(1)} m</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="3.0"
-                    max="10.0"
-                    step="0.5"
-                    value={height3D}
-                    onChange={(e) => setHeight3D(parseFloat(e.target.value))}
-                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
-                  />
-                </div>
-
-                {/* Roof Slope Alpha */}
-                <div className="param-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                    <label className="param-label" style={{ margin: 0 }}>Kąt nachylenia dachu α [°]</label>
-                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{slope3D.toFixed(0)}°</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="5"
-                    max="45"
-                    step="1"
-                    value={slope3D}
-                    onChange={(e) => setSlope3D(parseFloat(e.target.value))}
-                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
-                  />
-                </div>
-
-                {/* Length L */}
-                <div className="param-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                    <label className="param-label" style={{ margin: 0 }}>Długość całkowita L [m]</label>
-                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{length3D.toFixed(1)} m</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="3.0"
-                    max="15.0"
-                    step="0.5"
-                    value={length3D}
-                    onChange={(e) => setLength3D(parseFloat(e.target.value))}
-                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
-                  />
-                </div>
-
-                {/* Bays n_bays */}
-                <div className="param-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                    <label className="param-label" style={{ margin: 0 }}>Liczba segmentów (n_bays)</label>
-                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{bays3D}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="1"
-                    max="5"
-                    step="1"
-                    value={bays3D}
-                    onChange={(e) => setBays3D(parseInt(e.target.value))}
-                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
-                  />
-                </div>
-
-                <h3 className="panel-heading" style={{ marginTop: '12px' }}>Przekroje Grup Prętów</h3>
-
-                {/* Słupy (Columns) */}
-                <div className="param-group">
-                  <label className="param-label" htmlFor="param-column-section" style={{ display: 'block', marginBottom: '6px' }}>
-                    Słupy pionowe (Columns)
-                  </label>
-                  <select
-                    id="param-column-section"
-                    value={columnSection}
-                    onChange={(e) => setColumnSection(e.target.value)}
-                    className="param-select"
-                    style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px 8px' }}
-                  >
-                    <option value="HEB100">HEB 100</option>
-                    <option value="HEB120">HEB 120</option>
-                    <option value="HEB140">HEB 140</option>
-                    <option value="HEB160">HEB 160</option>
-                    <option value="HEB180">HEB 180</option>
-                    <option value="HEB200">HEB 200</option>
-                    <option value="HEB220">HEB 220</option>
-                    <option value="HEB240">HEB 240</option>
-                    <option value="HEB260">HEB 260</option>
-                    <option value="HEB280">HEB 280</option>
-                    <option value="HEB300">HEB 300</option>
-                  </select>
-                </div>
-
-                {/* Rygle (Rafters) */}
-                <div className="param-group">
-                  <label className="param-label" htmlFor="param-rafter-section" style={{ display: 'block', marginBottom: '6px' }}>
-                    Rygle dachowe ukośne (Rafters)
-                  </label>
-                  <select
-                    id="param-rafter-section"
-                    value={rafterSection}
-                    onChange={(e) => setRafterSection(e.target.value)}
-                    className="param-select"
-                    style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px 8px' }}
-                  >
-                    <option value="IPE100">IPE 100</option>
-                    <option value="IPE120">IPE 120</option>
-                    <option value="IPE140">IPE 140</option>
-                    <option value="IPE160">IPE 160</option>
-                    <option value="IPE180">IPE 180</option>
-                    <option value="IPE200">IPE 200</option>
-                    <option value="IPE220">IPE 220</option>
-                    <option value="IPE240">IPE 240</option>
-                    <option value="IPE270">IPE 270</option>
-                    <option value="IPE300">IPE 300</option>
-                    <option value="IPE330">IPE 330</option>
-                    <option value="IPE360">IPE 360</option>
-                    <option value="IPE400">IPE 400</option>
-                  </select>
-                </div>
-
-                {/* Stężenia (Bracings) */}
-                <div className="param-group">
-                  <label className="param-label" htmlFor="param-bracing-section" style={{ display: 'block', marginBottom: '6px' }}>
-                    Płatwie i stężenia (Bracings)
-                  </label>
-                  <select
-                    id="param-bracing-section"
-                    value={bracingSection}
-                    onChange={(e) => setBracingSection(e.target.value)}
-                    className="param-select"
-                    style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px 8px' }}
-                  >
-                    <option value="IPE100">IPE 100</option>
-                    <option value="IPE120">IPE 120</option>
-                    <option value="IPE140">IPE 140</option>
-                    <option value="IPE160">IPE 160</option>
-                    <option value="IPE180">IPE 180</option>
-                    <option value="IPE200">IPE 200</option>
-                    <option value="IPE220">IPE 220</option>
-                  </select>
-                </div>
-
-                <h3 className="panel-heading" style={{ marginTop: '12px' }}>Wizualizacja</h3>
-
-                {/* Skala deformacji */}
-                <div className="param-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                    <label className="param-label" style={{ margin: 0 }}>Skala deformacji</label>
-                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{deformationScale}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="200"
-                    step="5"
-                    value={deformationScale}
-                    onChange={(e) => setDeformationScale(parseInt(e.target.value))}
-                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
-                  />
-                </div>
-              </div>
-            </div>
-          ) : (
-            <>
-              {/* Sekcja: Geometria */}
-              <div className="panel-section">
-                <h3 className="panel-heading">Geometria Przęsła</h3>
-                <div className="param-group">
-                  <label className="param-label" htmlFor="param-length">Długość całkowita belki (L) [m]</label>
-                  <div className="param-input-group">
-                    <input 
-                      id="param-length"
-                      type="range" 
-                      min="1.0" 
-                      max="20.0" 
-                      step="0.5" 
-                      value={beamLength}
-                      onChange={(e) => setBeamLength(parseFloat(e.target.value))}
-                      className="param-range"
-                    />
-                    <span className="param-value mono-value">{beamLength.toFixed(1)}</span>
-                  </div>
-                </div>
-              </div>
-
-          {/* Supports */}
-          <div className="properties-panel__section">
-            <div className="properties-panel__section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>Podpory belki</span>
-              <button 
-                className="btn btn--primary" 
-                onClick={() => addSupport()} 
-                style={{ padding: '2px 8px', fontSize: '11px', height: 'auto', borderRadius: '4px' }}
-                disabled={supports.length >= 8}
-              >
-                + Dodaj
-              </button>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
-              {supports.map((s, idx) => {
-                const isStart = idx === 0;
-                const isEnd = idx === supports.length - 1;
-                const isEdge = isStart || isEnd;
-                return (
-                  <div key={s.id} style={{ 
-                    background: 'rgba(255,255,255,0.03)', 
-                    padding: '8px 12px', 
-                    borderRadius: '8px', 
-                    border: '1px solid rgba(255,255,255,0.06)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '4px'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#94a3b8' }}>
-                        Węzeł N{idx + 1} ({isStart ? 'Start' : isEnd ? 'Koniec' : `x = ${s.x.toFixed(1)}m`})
-                      </span>
-                      {supports.length > 2 && (
-                        <button 
-                          onClick={() => removeSupport(s.id)}
-                          style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '12px', cursor: 'pointer', padding: 0, fontWeight: 'bold' }}
-                          title="Usuń węzeł"
-                        >
-                          ✕
-                        </button>
-                      )}
-                    </div>
-
-                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '4px' }}>
-                      {!isEdge && (
+                  )}
+                </>
+              ) : (
+                <>
+                  {/* Concrete Geometry */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Parametry Żelbetu (EC2)</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '10px' }}>
+                      {/* Width b */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <label className="param-label" style={{ margin: 0 }}>Szerokość belki b [cm]</label>
+                          <span className="mono-value" style={{ color: '#10b981', fontWeight: 'bold' }}>{rcWidth} cm</span>
+                        </div>
                         <input
                           type="range"
-                          min="0.5"
-                          max={beamLength - 0.5}
-                          step="0.1"
-                          value={s.x}
-                          onChange={(e) => updateSupportX(s.id, parseFloat(e.target.value))}
-                          style={{ flex: 1, accentColor: '#3b82f6', height: '4px' }}
+                          min="15"
+                          max="80"
+                          step="5"
+                          value={rcWidth}
+                          onChange={(e) => setRcWidth(parseInt(e.target.value))}
+                          style={{ width: '100%', accentColor: '#10b981', height: '4px' }}
+                          id="rc-param-width"
                         />
-                      )}
-                      
-                      <div style={{ display: 'flex', gap: '4px', flex: isEdge ? 1 : 'unset', justifyContent: isEdge ? 'flex-end' : 'flex-start' }}>
-                        <button
-                          onClick={() => updateSupportType(s.id, 'Roller')}
-                          style={{
-                            padding: '2px 8px',
-                            fontSize: '11px',
-                            borderRadius: '4px',
-                            border: '1px solid rgba(255,255,255,0.1)',
-                            background: s.type === 'Roller' ? '#2563eb' : 'rgba(0,0,0,0.3)',
-                            color: '#fff',
-                            cursor: 'pointer'
-                          }}
+                      </div>
+
+                      {/* Height h */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <label className="param-label" style={{ margin: 0 }}>Wysokość belki h [cm]</label>
+                          <span className="mono-value" style={{ color: '#10b981', fontWeight: 'bold' }}>{rcHeight} cm</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="20"
+                          max="120"
+                          step="5"
+                          value={rcHeight}
+                          onChange={(e) => setRcHeight(parseInt(e.target.value))}
+                          style={{ width: '100%', accentColor: '#10b981', height: '4px' }}
+                          id="rc-param-height"
+                        />
+                      </div>
+
+                      {/* Cover cover */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <label className="param-label" style={{ margin: 0 }}>Otulina c_nom [cm]</label>
+                          <span className="mono-value" style={{ color: '#10b981', fontWeight: 'bold' }}>{rcCover.toFixed(1)} cm</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="2"
+                          max="6"
+                          step="0.5"
+                          value={rcCover}
+                          onChange={(e) => setRcCover(parseFloat(e.target.value))}
+                          style={{ width: '100%', accentColor: '#10b981', height: '4px' }}
+                          id="rc-param-cover"
+                        />
+                      </div>
+
+                      {/* Concrete Class */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <label className="param-label" style={{ margin: 0 }}>Klasa betonu</label>
+                        <select
+                          value={rcConcreteClass}
+                          onChange={(e) => setRcConcreteClass(e.target.value as any)}
+                          className="param-select"
+                          id="rc-param-class"
                         >
-                          Przesuwna
-                        </button>
-                        <button
-                          onClick={() => updateSupportType(s.id, 'Pinned')}
-                          style={{
-                            padding: '2px 8px',
-                            fontSize: '11px',
-                            borderRadius: '4px',
-                            border: '1px solid rgba(255,255,255,0.1)',
-                            background: s.type === 'Pinned' ? '#2563eb' : 'rgba(0,0,0,0.3)',
-                            color: '#fff',
-                            cursor: 'pointer'
-                          }}
+                          <option value="C20/25">C20/25 (fck = 20 MPa)</option>
+                          <option value="C25/30">C25/30 (fck = 25 MPa)</option>
+                          <option value="C30/37">C30/37 (fck = 30 MPa)</option>
+                        </select>
+                      </div>
+
+                      {/* Steel Grade */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <label className="param-label" style={{ margin: 0 }}>Klasa stali zbrojeniowej</label>
+                        <select
+                          value={rcSteelGrade}
+                          onChange={(e) => setRcSteelGrade(parseInt(e.target.value))}
+                          className="param-select"
+                          id="rc-param-steel"
                         >
-                          Stała
-                        </button>
-                        <button
-                          onClick={() => updateSupportType(s.id, 'Fixed')}
-                          style={{
-                            padding: '2px 8px',
-                            fontSize: '11px',
-                            borderRadius: '4px',
-                            border: '1px solid rgba(255,255,255,0.1)',
-                            background: s.type === 'Fixed' ? '#2563eb' : 'rgba(0,0,0,0.3)',
-                            color: '#fff',
-                            cursor: 'pointer'
-                          }}
-                        >
-                          Utwierdzenie
-                        </button>
+                          <option value="500">S500 (fyk = 500 MPa)</option>
+                          <option value="400">S400 (fyk = 400 MPa)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Concrete Design Results Card */}
+                  {rcResult && (
+                    <div className="properties-panel__section">
+                      <div className="properties-panel__section-title">Wymiarowanie Żelbetu</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+                        {rcResult.is_overreinforced ? (
+                          <div style={{ 
+                            background: 'rgba(239, 68, 68, 0.15)', 
+                            border: '1px solid #ef4444', 
+                            padding: '12px', 
+                            borderRadius: '8px',
+                            color: '#fca5a5',
+                            fontSize: '12px',
+                            lineHeight: '1.4'
+                          }} id="rc-result-overreinforced">
+                            <div style={{ fontWeight: 'bold', fontSize: '13px', marginBottom: '4px' }}>🔴 PRZEBROJENIE PRZEKROJU!</div>
+                            Współczynnik mi = {rcResult.mi.toFixed(3)} przekracza wartość graniczną mi_lim = 0.372. 
+                            Należy zwiększyć wysokość/szerokość belki lub podwyższyć klasę betonu.
+                          </div>
+                        ) : (
+                          <>
+                            <div style={{ 
+                              background: 'rgba(16, 185, 129, 0.05)', 
+                              border: '1px solid rgba(16, 185, 129, 0.2)', 
+                              padding: '10px 12px', 
+                              borderRadius: '8px',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center'
+                            }}>
+                              <span style={{ fontSize: '11px', color: '#94a3b8' }}>Wysokość użyteczna d:</span>
+                              <span className="mono-value" style={{ fontSize: '12px', fontWeight: 'bold', color: '#e2e8f0' }}>{(rcResult.d * 100).toFixed(1)} cm</span>
+                            </div>
+
+                            <div style={{ 
+                              background: 'rgba(16, 185, 129, 0.05)', 
+                              border: '1px solid rgba(16, 185, 129, 0.2)', 
+                              padding: '10px 12px', 
+                              borderRadius: '8px',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center'
+                            }}>
+                              <span style={{ fontSize: '11px', color: '#94a3b8' }}>Moment względny mi:</span>
+                              <span className="mono-value" style={{ fontSize: '12px', fontWeight: 'bold', color: '#e2e8f0' }}>{rcResult.mi.toFixed(3)}</span>
+                            </div>
+
+                            <div style={{ 
+                              background: 'rgba(16, 185, 129, 0.1)', 
+                              border: '1px solid #10b981', 
+                              padding: '12px', 
+                              borderRadius: '8px',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '6px'
+                            }} id="rc-result-success">
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ fontSize: '11px', color: '#a7f3d0', fontWeight: '500' }}>Wymagane zbrojenie As,req:</span>
+                                <span className="mono-value" style={{ fontSize: '14px', fontWeight: 'bold', color: '#10b981' }}>{rcResult.as_req.toFixed(2)} cm²</span>
+                              </div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ fontSize: '11px', color: '#a7f3d0', fontWeight: '500' }}>Minimalne zbrojenie As,min:</span>
+                                <span className="mono-value" style={{ fontSize: '14px', fontWeight: 'bold', color: '#10b981' }}>{rcResult.as_min.toFixed(2)} cm²</span>
+                              </div>
+                              <div style={{ height: '1px', background: 'rgba(16, 185, 129, 0.2)', margin: '4px 0' }} />
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ fontSize: '12px', color: '#fff', fontWeight: 'bold' }}>Dobierz przekrój As:</span>
+                                <span className="mono-value" style={{ fontSize: '15px', fontWeight: 'bold', color: '#10b981' }}>
+                                  {Math.max(rcResult.as_req, rcResult.as_min).toFixed(2)} cm²
+                                </span>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Results */}
+              {results && (() => {
+                const maxDeflection = Math.max(...results.map(r => Math.abs(r.deflection)));
+                const maxMoment = Math.max(...results.map(r => Math.abs(r.moment)));
+                const maxShear = Math.max(...results.map(r => Math.abs(r.shear)));
+
+                return (
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Wyniki Analizy</div>
+
+                    <div className="result-card result-card--moment">
+                      <div className="result-card__label">Moment zginający max</div>
+                      <div className="result-card__value">
+                        {maxMoment.toFixed(2)}
+                        <span className="result-card__unit">kNm</span>
+                      </div>
+                    </div>
+
+                    <div className="result-card result-card--shear">
+                      <div className="result-card__label">Siła tnąca max</div>
+                      <div className="result-card__value">
+                        {maxShear.toFixed(2)}
+                        <span className="result-card__unit">kN</span>
+                      </div>
+                    </div>
+
+                    <div className="result-card result-card--deflection">
+                      <div className="result-card__label">Ugięcie max</div>
+                      <div className="result-card__value">
+                        {maxDeflection.toFixed(3)}
+                        <span className="result-card__unit">mm</span>
                       </div>
                     </div>
                   </div>
                 );
-              })}
-            </div>
-          </div>
+              })()}
 
-          {/* Point Loads */}
-          <div className="properties-panel__section">
-            <div className="properties-panel__section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>Siły skupione</span>
-              <button 
-                className="btn btn--primary" 
-                onClick={() => addPointLoad()} 
-                style={{ padding: '2px 8px', fontSize: '11px', height: 'auto', borderRadius: '4px' }}
-                disabled={pointLoads.length >= 5}
-              >
-                + Dodaj
-              </button>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
-              {pointLoads.map((pl, idx) => (
-                <div key={pl.id} style={{ 
-                  background: 'rgba(255,255,255,0.03)', 
-                  padding: '8px 12px', 
-                  borderRadius: '8px', 
-                  border: '1px solid rgba(255,255,255,0.06)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '4px'
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#f97316' }}>
-                      Siła P{idx + 1} (x = {pl.x.toFixed(1)}m)
-                    </span>
-                    <button 
-                      onClick={() => removePointLoad(pl.id)}
-                      style={{ background: 'none', border: 'none', color: '#ef4444', fontSize: '12px', cursor: 'pointer', padding: 0, fontWeight: 'bold' }}
-                      title="Usuń siłę"
-                    >
-                      ✕
-                    </button>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginTop: '4px' }}>
-                    <label style={{ fontSize: '10px', color: '#64748b' }}>Pozycja [m]</label>
-                    <input
-                      type="range"
-                      min="0.1"
-                      max={beamLength - 0.1}
-                      step="0.1"
-                      value={pl.x}
-                      onChange={(e) => updatePointLoadX(pl.id, parseFloat(e.target.value))}
-                      style={{ width: '100%', accentColor: '#f97316', height: '4px' }}
-                    />
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginTop: '4px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <label style={{ fontSize: '10px', color: '#64748b' }}>Wartość [kN]</label>
-                      <span className="mono-value" style={{ fontSize: '10px', color: '#f97316', fontWeight: 'bold' }}>{pl.value.toFixed(1)} kN</span>
-                    </div>
-                    <input
-                      type="range"
-                      min="-100"
-                      max="100"
-                      step="5"
-                      value={pl.value}
-                      onChange={(e) => updatePointLoadVal(pl.id, parseFloat(e.target.value))}
-                      style={{ width: '100%', accentColor: '#f97316', height: '4px' }}
-                    />
-                  </div>
-                </div>
-              ))}
-              {pointLoads.length === 0 && (
-                <div style={{ fontSize: '11px', color: '#64748b', fontStyle: 'italic', textAlign: 'center', padding: '6px 0' }}>
-                  Brak sił skupionych. Dodaj siłę przyciskiem powyżej.
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Load */}
-          <div className="properties-panel__section">
-            <div className="properties-panel__section-title">Obciążenie ciągłe</div>
-            <label className="param-label" htmlFor="param-load">
-              Obciążenie ciągłe [kN/m]
-            </label>
-            <div className="param-input-group" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <input
-                id="param-load"
-                type="range"
-                min="1"
-                max="100"
-                step="1"
-                value={loadValue}
-                onChange={(e) => setLoadValue(parseFloat(e.target.value))}
-                className="param-range"
-                style={{ flex: 1 }}
-              />
-              <input 
-                type="number"
-                min="1"
-                max="1000"
-                step="1"
-                value={loadValue}
-                onChange={(e) => setLoadValue(parseFloat(e.target.value) || 0)}
-                style={{ width: '60px', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', padding: '2px 4px', textAlign: 'center' }}
-              />
-              <span className="param-value mono-value">{loadValue.toFixed(1)}</span>
-            </div>
-          </div>
-
-          {/* Faza 3: Przekrój Stalowy lub Przekrój Żelbetowy */}
-          {designType === 'steel' ? (
-            <>
-              {/* Section */}
-              <div className="properties-panel__section">
-                <div className="properties-panel__section-title">Przekrój</div>
-                <label className="param-label" htmlFor="param-section">
-                  Profil stalowy
-                </label>
-                <select
-                  id="param-section"
-                  value={sectionId}
-                  onChange={(e) => setSectionId(e.target.value)}
-                  className="param-select"
-                >
-                  <option value="IPE200">IPE 200</option>
-                  <option value="IPE300">IPE 300</option>
-                  <option value="IPE400">IPE 400</option>
-                  <option value="HEB200">HEB 200</option>
-                  <option value="HEB300">HEB 300</option>
-                </select>
-              </div>
-
-              {/* AI Section Recommendation */}
-              {optResults && optResults.success && (
-                <div className="properties-panel__section">
-                  <div className="properties-panel__section-title">Optymalizator Generatywny</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
-                    
-                    {/* Cheapest (Najtańszy) */}
-                    {optResults.cheapest && (
-                      <div 
-                        onClick={() => setSectionId(optResults.cheapest!.name.replace(' ', ''))}
-                        style={{ 
-                          background: sectionId === optResults.cheapest.name.replace(' ', '') ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255,255,255,0.02)', 
-                          border: sectionId === optResults.cheapest.name.replace(' ', '') ? '1px solid #10b981' : '1px solid rgba(255,255,255,0.06)',
-                          padding: '10px 12px',
-                          borderRadius: '8px',
-                          cursor: 'pointer',
-                          transition: 'all 0.15s ease'
-                        }}
-                        className="opt-card"
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#10b981' }}>🟢 Najtańszy profil</span>
-                          <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.cheapest.weight.toFixed(1)} kg/m</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
-                          <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.cheapest.name}</span>
-                          <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.cheapest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
-                            Wytężenie: {(optResults.cheapest.utilization_sgn * 100).toFixed(0)}%
-                          </span>
-                        </div>
-                        <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
-                          Ugięcie: {optResults.cheapest.deflection_sgu.toFixed(1)} mm / {optResults.cheapest.limit_sgu.toFixed(1)} mm
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Lightest (Najlżejszy) */}
-                    {optResults.lightest && (
-                      <div 
-                        onClick={() => setSectionId(optResults.lightest!.name.replace(' ', ''))}
-                        style={{ 
-                          background: sectionId === optResults.lightest.name.replace(' ', '') ? 'rgba(6, 182, 212, 0.12)' : 'rgba(255,255,255,0.02)', 
-                          border: sectionId === optResults.lightest.name.replace(' ', '') ? '1px solid #06b6d4' : '1px solid rgba(255,255,255,0.06)',
-                          padding: '10px 12px',
-                          borderRadius: '8px',
-                          cursor: 'pointer',
-                          transition: 'all 0.15s ease'
-                        }}
-                        className="opt-card"
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#06b6d4' }}>⚡ Najlżejszy profil (Eco)</span>
-                          <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.lightest.weight.toFixed(1)} kg/m</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
-                          <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.lightest.name}</span>
-                          <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: optResults.lightest.utilization_sgn > 0.95 ? '#ef4444' : '#f59e0b' }}>
-                            Wytężenie: {(optResults.lightest.utilization_sgn * 100).toFixed(0)}%
-                          </span>
-                        </div>
-                        <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
-                          Ugięcie: {optResults.lightest.deflection_sgu.toFixed(1)} mm / {optResults.lightest.limit_sgu.toFixed(1)} mm
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Balanced (Zrównoważony) */}
-                    {optResults.balanced && (
-                      <div 
-                        onClick={() => setSectionId(optResults.balanced!.name.replace(' ', ''))}
-                        style={{ 
-                          background: sectionId === optResults.balanced.name.replace(' ', '') ? 'rgba(139, 92, 246, 0.12)' : 'rgba(255,255,255,0.02)', 
-                          border: sectionId === optResults.balanced.name.replace(' ', '') ? '1px solid #8b5cf6' : '1px solid rgba(255,255,255,0.06)',
-                          padding: '10px 12px',
-                          borderRadius: '8px',
-                          cursor: 'pointer',
-                          transition: 'all 0.15s ease'
-                        }}
-                        className="opt-card"
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b5cf6' }}>⚖ Zrównoważony profil (60-70%)</span>
-                          <span className="mono-value" style={{ fontSize: '10px', color: '#64748b' }}>{optResults.balanced.weight.toFixed(1)} kg/m</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
-                          <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#e2e8f0' }}>{optResults.balanced.name}</span>
-                          <span className="mono-value" style={{ fontSize: '11px', fontWeight: '600', color: '#8b5cf6' }}>
-                            Wytężenie: {(optResults.balanced.utilization_sgn * 100).toFixed(0)}%
-                          </span>
-                        </div>
-                        <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
-                          Ugięcie: {optResults.balanced.deflection_sgu.toFixed(1)} mm / {optResults.balanced.limit_sgu.toFixed(1)} mm
-                        </div>
-                      </div>
-                    )}
-                  </div>
+              {/* Raport Generator */}
+              {results && (
+                <div className="properties-panel__section" style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '15px' }}>
+                  <button 
+                    className="btn btn--primary" 
+                    onClick={handleDownloadReport}
+                    style={{ 
+                      width: '100%', 
+                      background: designType === 'steel' 
+                        ? 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)'
+                        : 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                      boxShadow: designType === 'steel'
+                        ? '0 4px 12px rgba(59, 130, 246, 0.3)'
+                        : '0 4px 12px rgba(16, 185, 129, 0.3)',
+                      border: 'none',
+                      borderRadius: '8px',
+                      fontWeight: 'bold',
+                      display: 'flex',
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                      gap: '8px',
+                      height: '42px',
+                      fontSize: '13px'
+                    }}
+                    id="btn-generate-report"
+                  >
+                    📄 Generuj Raport White-Box (.tex)
+                  </button>
                 </div>
               )}
             </>
           ) : (
+            // ==================== TRYB 3D ====================
             <>
-              {/* Concrete Geometry */}
-              <div className="properties-panel__section">
-                <div className="properties-panel__section-title">Parametry Żelbetu (EC2)</div>
-                
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '10px' }}>
-                  
-                  {/* Width b */}
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                      <label className="param-label" style={{ margin: 0 }}>Szerokość belki b [cm]</label>
-                      <span className="mono-value" style={{ color: '#10b981', fontWeight: 'bold' }}>{rcWidth} cm</span>
-                    </div>
-                    <input
-                      type="range"
-                      min="15"
-                      max="80"
-                      step="5"
-                      value={rcWidth}
-                      onChange={(e) => setRcWidth(parseInt(e.target.value))}
-                      style={{ width: '100%', accentColor: '#10b981', height: '4px' }}
-                      id="rc-param-width"
-                    />
-                  </div>
-
-                  {/* Height h */}
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                      <label className="param-label" style={{ margin: 0 }}>Wysokość belki h [cm]</label>
-                      <span className="mono-value" style={{ color: '#10b981', fontWeight: 'bold' }}>{rcHeight} cm</span>
-                    </div>
-                    <input
-                      type="range"
-                      min="20"
-                      max="120"
-                      step="5"
-                      value={rcHeight}
-                      onChange={(e) => setRcHeight(parseInt(e.target.value))}
-                      style={{ width: '100%', accentColor: '#10b981', height: '4px' }}
-                      id="rc-param-height"
-                    />
-                  </div>
-
-                  {/* Cover cover */}
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                      <label className="param-label" style={{ margin: 0 }}>Otulina c_nom [cm]</label>
-                      <span className="mono-value" style={{ color: '#10b981', fontWeight: 'bold' }}>{rcCover.toFixed(1)} cm</span>
-                    </div>
-                    <input
-                      type="range"
-                      min="2"
-                      max="6"
-                      step="0.5"
-                      value={rcCover}
-                      onChange={(e) => setRcCover(parseFloat(e.target.value))}
-                      style={{ width: '100%', accentColor: '#10b981', height: '4px' }}
-                      id="rc-param-cover"
-                    />
-                  </div>
-
-                  {/* Concrete Class */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    <label className="param-label" style={{ margin: 0 }}>Klasa betonu</label>
-                    <select
-                      value={rcConcreteClass}
-                      onChange={(e) => setRcConcreteClass(e.target.value as any)}
-                      className="param-select"
-                      id="rc-param-class"
-                    >
-                      <option value="C20/25">C20/25 (fck = 20 MPa)</option>
-                      <option value="C25/30">C25/30 (fck = 25 MPa)</option>
-                      <option value="C30/37">C30/37 (fck = 30 MPa)</option>
-                    </select>
-                  </div>
-
-                  {/* Steel Grade */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    <label className="param-label" style={{ margin: 0 }}>Klasa stali zbrojeniowej</label>
-                    <select
-                      value={rcSteelGrade}
-                      onChange={(e) => setRcSteelGrade(parseInt(e.target.value))}
-                      className="param-select"
-                      id="rc-param-steel"
-                    >
-                      <option value="500">S500 (fyk = 500 MPa)</option>
-                      <option value="400">S400 (fyk = 400 MPa)</option>
-                    </select>
-                  </div>
-
-                </div>
+              {/* Tabs for Generator vs Free CAD */}
+              <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                <button
+                  onClick={() => setWorkMode3D('parametric')}
+                  style={{
+                    flex: 1,
+                    padding: '12px',
+                    background: workMode3D === 'parametric' ? 'rgba(139, 92, 246, 0.15)' : 'transparent',
+                    border: 'none',
+                    borderBottom: workMode3D === 'parametric' ? '2px solid #8b5cf6' : '2px solid transparent',
+                    color: workMode3D === 'parametric' ? '#a78bfa' : '#94a3b8',
+                    fontWeight: 'bold',
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                  id="tab-3d-parametric"
+                >
+                  📐 Kreator Ramy
+                </button>
+                <button
+                  onClick={() => setWorkMode3D('free_cad')}
+                  style={{
+                    flex: 1,
+                    padding: '12px',
+                    background: workMode3D === 'free_cad' ? 'rgba(99, 102, 241, 0.15)' : 'transparent',
+                    border: 'none',
+                    borderBottom: workMode3D === 'free_cad' ? '2px solid #6366f1' : '2px solid transparent',
+                    color: workMode3D === 'free_cad' ? '#818cf8' : '#94a3b8',
+                    fontWeight: 'bold',
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                  id="tab-3d-freecad"
+                >
+                  ✏️ Edytor CAD
+                </button>
               </div>
 
-              {/* Concrete Design Results Card */}
-              {rcResult && (
-                <div className="properties-panel__section">
-                  <div className="properties-panel__section-title">Wymiarowanie Żelbetu</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+              {workMode3D === 'parametric' ? (
+                <>
+                  {/* Sekcja: Parametryczna Geometria 3D */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Parametry Ramy</div>
                     
-                    {rcResult.is_overreinforced ? (
-                      <div style={{ 
-                        background: 'rgba(239, 68, 68, 0.15)', 
-                        border: '1px solid #ef4444', 
-                        padding: '12px', 
-                        borderRadius: '8px',
-                        color: '#fca5a5',
-                        fontSize: '12px',
-                        lineHeight: '1.4'
-                      }} id="rc-result-overreinforced">
-                        <div style={{ fontWeight: 'bold', fontSize: '13px', marginBottom: '4px' }}>🔴 PRZEBROJENIE PRZEKROJU!</div>
-                        Współczynnik mi = {rcResult.mi.toFixed(3)} przekracza wartość graniczną mi_lim = 0.372. 
-                        Należy zwiększyć wysokość/szerokość belki lub podwyższyć klasę betonu.
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '10px' }}>
+                      {/* Width 3D */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <label className="param-label" style={{ margin: 0 }}>Szerokość ramy B [m]</label>
+                          <span className="mono-value" style={{ color: '#a78bfa', fontWeight: 'bold' }}>{width3D.toFixed(1)} m</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="3.0"
+                          max="15.0"
+                          step="0.5"
+                          value={width3D}
+                          onChange={(e) => setWidth3D(parseFloat(e.target.value))}
+                          style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                          id="param-3d-width"
+                        />
+                      </div>
+
+                      {/* Height 3D */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <label className="param-label" style={{ margin: 0 }}>Wysokość okapu H [m]</label>
+                          <span className="mono-value" style={{ color: '#a78bfa', fontWeight: 'bold' }}>{height3D.toFixed(1)} m</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="2.0"
+                          max="8.0"
+                          step="0.5"
+                          value={height3D}
+                          onChange={(e) => setHeight3D(parseFloat(e.target.value))}
+                          style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                          id="param-3d-height"
+                        />
+                      </div>
+
+                      {/* Slope 3D */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <label className="param-label" style={{ margin: 0 }}>Spadek dachu alpha [°]</label>
+                          <span className="mono-value" style={{ color: '#a78bfa', fontWeight: 'bold' }}>{slope3D.toFixed(0)}°</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.0"
+                          max="45.0"
+                          step="5"
+                          value={slope3D}
+                          onChange={(e) => setSlope3D(parseFloat(e.target.value))}
+                          style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                          id="param-3d-slope"
+                        />
+                      </div>
+
+                      {/* Length 3D */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <label className="param-label" style={{ margin: 0 }}>Długość hali L [m]</label>
+                          <span className="mono-value" style={{ color: '#a78bfa', fontWeight: 'bold' }}>{length3D.toFixed(1)} m</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="3.0"
+                          max="30.0"
+                          step="1.0"
+                          value={length3D}
+                          onChange={(e) => setLength3D(parseFloat(e.target.value))}
+                          style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                          id="param-3d-length"
+                        />
+                      </div>
+
+                      {/* Bays 3D */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <label className="param-label" style={{ margin: 0 }}>Liczba traktów (bays)</label>
+                          <span className="mono-value" style={{ color: '#a78bfa', fontWeight: 'bold' }}>{bays3D}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="1"
+                          max="10"
+                          step="1"
+                          value={bays3D}
+                          onChange={(e) => setBays3D(parseInt(e.target.value))}
+                          style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                          id="param-3d-bays"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Section Profile Selectors */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Przekroje Stalowe 3D</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
+                      <div>
+                        <label className="param-label" style={{ margin: '0 0 4px 0' }}>Słupy (Columns)</label>
+                        <select
+                          value={columnSection}
+                          onChange={(e) => setColumnSection(e.target.value)}
+                          className="param-select"
+                        >
+                          {Object.keys(STEEL_PROFILES_3D).filter(k => k.startsWith('HEB')).map(k => (
+                            <option key={k} value={k}>{k}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="param-label" style={{ margin: '0 0 4px 0' }}>Rygle (Rafters)</label>
+                        <select
+                          value={rafterSection}
+                          onChange={(e) => setRafterSection(e.target.value)}
+                          className="param-select"
+                        >
+                          {Object.keys(STEEL_PROFILES_3D).filter(k => k.startsWith('IPE')).map(k => (
+                            <option key={k} value={k}>{k}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="param-label" style={{ margin: '0 0 4px 0' }}>Stężenia / Płatwie (Bracings)</label>
+                        <select
+                          value={bracingSection}
+                          onChange={(e) => setBracingSection(e.target.value)}
+                          className="param-select"
+                        >
+                          {Object.keys(STEEL_PROFILES_3D).filter(k => k.startsWith('IPE')).map(k => (
+                            <option key={k} value={k}>{k}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Visual controls */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Skala deformacji 3D</div>
+                    <div style={{ marginTop: '10px' }}>
+                      <input
+                        type="range"
+                        min="10"
+                        max="500"
+                        step="10"
+                        value={deformationScale}
+                        onChange={(e) => setDeformationScale(parseInt(e.target.value))}
+                        style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                      />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#94a3b8', marginTop: '4px' }}>
+                        <span>Mniejsza</span>
+                        <span>x{deformationScale}</span>
+                        <span>Większa</span>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* Free CAD Manual Editor Section */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Inspektor CAD 3D</div>
+                    
+                    {selectedEntity ? (
+                      <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                        {selectedEntity.type === 'node' ? (() => {
+                          const node = getNode(selectedEntity.id);
+                          const restraints = node.supportRestraints || [false, false, false, false, false, false];
+                          const restraintNames = ['Tx', 'Ty', 'Tz', 'Rx', 'Ry', 'Rz'];
+                          return (
+                            <>
+                              <div style={{ background: 'rgba(255,255,255,0.03)', padding: '10px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                                <span style={{ fontSize: '11px', color: '#818cf8', fontWeight: 'bold' }}>Węzeł ID:</span>
+                                <div className="mono-value" style={{ fontSize: '14px', fontWeight: 'bold', color: '#fff', marginTop: '2px' }}>{selectedEntity.id}</div>
+                              </div>
+
+                              {/* Coordinate Editors */}
+                              <div>
+                                <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '600' }}>Współrzędne węzła [m]:</span>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px', marginTop: '6px' }}>
+                                  <div>
+                                    <label style={{ fontSize: '10px', color: '#64748b', display: 'block', marginBottom: '2px' }}>X</label>
+                                    <input
+                                      type="number"
+                                      step="0.1"
+                                      value={node.x || 0}
+                                      onChange={(e) => updateNodeCoord(selectedEntity.id, 'x', parseFloat(e.target.value))}
+                                      style={{ width: '100%', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px', borderRadius: '6px', fontSize: '12px' }}
+                                    />
+                                  </div>
+                                  <div>
+                                    <label style={{ fontSize: '10px', color: '#64748b', display: 'block', marginBottom: '2px' }}>Y (Pion)</label>
+                                    <input
+                                      type="number"
+                                      step="0.1"
+                                      value={node.y || 0}
+                                      onChange={(e) => updateNodeCoord(selectedEntity.id, 'y', parseFloat(e.target.value))}
+                                      style={{ width: '100%', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px', borderRadius: '6px', fontSize: '12px' }}
+                                    />
+                                  </div>
+                                  <div>
+                                    <label style={{ fontSize: '10px', color: '#64748b', display: 'block', marginBottom: '2px' }}>Z</label>
+                                    <input
+                                      type="number"
+                                      step="0.1"
+                                      value={node.z || 0}
+                                      onChange={(e) => updateNodeCoord(selectedEntity.id, 'z', parseFloat(e.target.value))}
+                                      style={{ width: '100%', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px', borderRadius: '6px', fontSize: '12px' }}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* 6-DOF supportRestraints panel */}
+                              <div>
+                                <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '600' }}>Więzy podporowe (6-DOF):</span>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginTop: '6px' }}>
+                                  {restraintNames.map((name, idx) => (
+                                    <button
+                                      key={name}
+                                      onClick={() => toggleRestraint(selectedEntity.id, idx)}
+                                      style={{
+                                        padding: '8px 4px',
+                                        fontSize: '11px',
+                                        fontWeight: 'bold',
+                                        borderRadius: '6px',
+                                        border: '1px solid rgba(255,255,255,0.1)',
+                                        cursor: 'pointer',
+                                        background: restraints[idx] 
+                                          ? 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)' 
+                                          : 'rgba(0,0,0,0.3)',
+                                        color: restraints[idx] ? '#fff' : '#64748b',
+                                        boxShadow: restraints[idx] ? '0 0 8px rgba(99, 102, 241, 0.4)' : 'none',
+                                        transition: 'all 0.15s ease'
+                                      }}
+                                    >
+                                      🔗 {name}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            </>
+                          );
+                        })() : (() => {
+                          const element = getElement(selectedEntity.id);
+                          return (
+                            <>
+                              <div style={{ background: 'rgba(255,255,255,0.03)', padding: '10px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                                <span style={{ fontSize: '11px', color: '#818cf8', fontWeight: 'bold' }}>Pręt ID:</span>
+                                <div className="mono-value" style={{ fontSize: '14px', fontWeight: 'bold', color: '#fff', marginTop: '2px' }}>{selectedEntity.id}</div>
+                              </div>
+
+                              {/* Section/Profile Selector for Single Element */}
+                              <div>
+                                <label className="param-label" style={{ margin: '0 0 6px 0' }}>Przekrój pręta (Profile)</label>
+                                <select
+                                  value={element.sectionId || 'IPE220'}
+                                  onChange={(e) => updateElementProfile(selectedEntity.id, e.target.value)}
+                                  className="param-select"
+                                >
+                                  {Object.keys(STEEL_PROFILES_3D).map(k => (
+                                    <option key={k} value={k}>{k}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {/* Delete element */}
+                              <button
+                                onClick={() => removeElement(selectedEntity.id)}
+                                className="btn"
+                                style={{
+                                  width: '100%',
+                                  background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+                                  border: 'none',
+                                  borderRadius: '8px',
+                                  color: '#fff',
+                                  fontWeight: 'bold',
+                                  height: '38px',
+                                  display: 'flex',
+                                  justifyContent: 'center',
+                                  alignItems: 'center',
+                                  gap: '8px',
+                                  cursor: 'pointer',
+                                  boxShadow: '0 4px 12px rgba(239, 68, 68, 0.2)'
+                                }}
+                              >
+                                <Trash2 size={16} />
+                                Usuń pręt
+                              </button>
+                            </>
+                          );
+                        })()}
                       </div>
                     ) : (
-                      <>
-                        <div style={{ 
-                          background: 'rgba(16, 185, 129, 0.05)', 
-                          border: '1px solid rgba(16, 185, 129, 0.2)', 
-                          padding: '10px 12px', 
-                          borderRadius: '8px',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center'
-                        }}>
-                          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Wysokość użyteczna d:</span>
-                          <span className="mono-value" style={{ fontSize: '12px', fontWeight: 'bold', color: '#e2e8f0' }}>{(rcResult.d * 100).toFixed(1)} cm</span>
-                        </div>
-
-                        <div style={{ 
-                          background: 'rgba(16, 185, 129, 0.05)', 
-                          border: '1px solid rgba(16, 185, 129, 0.2)', 
-                          padding: '10px 12px', 
-                          borderRadius: '8px',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center'
-                        }}>
-                          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Moment względny mi:</span>
-                          <span className="mono-value" style={{ fontSize: '12px', fontWeight: 'bold', color: '#e2e8f0' }}>{rcResult.mi.toFixed(3)}</span>
-                        </div>
-
-                        <div style={{ 
-                          background: 'rgba(16, 185, 129, 0.1)', 
-                          border: '1px solid #10b981', 
-                          padding: '12px', 
-                          borderRadius: '8px',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: '6px'
-                        }} id="rc-result-success">
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '11px', color: '#a7f3d0', fontWeight: '500' }}>Wymagane zbrojenie As,req:</span>
-                            <span className="mono-value" style={{ fontSize: '14px', fontWeight: 'bold', color: '#10b981' }}>{rcResult.as_req.toFixed(2)} cm²</span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '11px', color: '#a7f3d0', fontWeight: '500' }}>Minimalne zbrojenie As,min:</span>
-                            <span className="mono-value" style={{ fontSize: '14px', fontWeight: 'bold', color: '#10b981' }}>{rcResult.as_min.toFixed(2)} cm²</span>
-                          </div>
-                          <div style={{ height: '1px', background: 'rgba(16, 185, 129, 0.2)', margin: '4px 0' }} />
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '12px', color: '#fff', fontWeight: 'bold' }}>Dobierz przekrój As:</span>
-                            <span className="mono-value" style={{ fontSize: '15px', fontWeight: 'bold', color: '#10b981' }}>
-                              {Math.max(rcResult.as_req, rcResult.as_min).toFixed(2)} cm²
-                            </span>
-                          </div>
-                        </div>
-                      </>
+                      <div style={{ 
+                        marginTop: '15px', 
+                        padding: '20px 15px', 
+                        background: 'rgba(255,255,255,0.02)', 
+                        border: '1px dashed rgba(255,255,255,0.1)',
+                        borderRadius: '10px',
+                        textAlign: 'center',
+                        color: '#94a3b8',
+                        fontSize: '12px',
+                        lineHeight: '1.5'
+                      }}>
+                        💡 <span style={{ fontWeight: 'bold', color: '#e2e8f0', display: 'block', marginBottom: '6px' }}>Brak Selekcji</span>
+                        Kliknij węzeł lub pręt bezpośrednio w oknie renderowania 3D, aby go dynamicznie zmodyfikować.<br /><br />
+                        Możesz także wybrać **narzędzie ołówka (✏)** z paska narzędzi i rysować nowe pręty łącząc węzły bezpośrednio na ekranie!
+                      </div>
                     )}
-
                   </div>
-                </div>
+                </>
               )}
-            </>
-          )}
-
-          {/* Results */}
-          {results && (() => {
-            const maxDeflection = Math.max(...results.map(r => Math.abs(r.deflection)));
-            const maxMoment = Math.max(...results.map(r => Math.abs(r.moment)));
-            const maxShear = Math.max(...results.map(r => Math.abs(r.shear)));
-
-            return (
-              <div className="properties-panel__section">
-                <div className="properties-panel__section-title">Wyniki Analizy</div>
-
-                <div className="result-card result-card--moment">
-                  <div className="result-card__label">Moment zginający max</div>
-                  <div className="result-card__value">
-                    {maxMoment.toFixed(2)}
-                    <span className="result-card__unit">kNm</span>
-                  </div>
-                </div>
-
-                <div className="result-card result-card--shear">
-                  <div className="result-card__label">Siła tnąca max</div>
-                  <div className="result-card__value">
-                    {maxShear.toFixed(2)}
-                    <span className="result-card__unit">kN</span>
-                  </div>
-                </div>
-
-                <div className="result-card result-card--deflection">
-                  <div className="result-card__label">Ugięcie max</div>
-                  <div className="result-card__value">
-                    {maxDeflection.toFixed(3)}
-                    <span className="result-card__unit">mm</span>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* Raport Generator */}
-          {results && (
-            <div className="properties-panel__section" style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '15px' }}>
-              <button 
-                className="btn btn--primary" 
-                onClick={handleDownloadReport}
-                style={{ 
-                  width: '100%', 
-                  background: designType === 'steel' 
-                    ? 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)'
-                    : 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                  boxShadow: designType === 'steel'
-                    ? '0 4px 12px rgba(59, 130, 246, 0.3)'
-                    : '0 4px 12px rgba(16, 185, 129, 0.3)',
-                  border: 'none',
-                  borderRadius: '8px',
-                  fontWeight: 'bold',
-                  display: 'flex',
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                  gap: '8px',
-                  height: '42px',
-                  fontSize: '13px'
-                }}
-                id="btn-generate-report"
-              >
-                📄 Generuj Raport White-Box (.tex)
-              </button>
-            </div>
-          )}
             </>
           )}
         </aside>

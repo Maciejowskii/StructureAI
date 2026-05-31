@@ -164,101 +164,72 @@ pub fn solve_mesh(input_val: JsValue) -> JsValue {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct Node3D {
     pub id: String,
     pub x: f64,
     pub y: f64,
     pub z: f64,
-    pub support_type: String, // "Free", "Fixed", "Pinned"
+    pub support_restraints: Vec<bool>, // [Tx, Ty, Tz, Rx, Ry, Rz]
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct Element3D {
     pub id: String,
-    pub start_node_id: String,
-    pub end_node_id: String,
+    pub start_node: String,
+    pub end_node: String,
     pub e: f64,
-    pub g: f64, // Shear modulus
+    pub g: f64,
     pub area: f64,
-    pub iy: f64, // Moment of inertia about local Y
-    pub iz: f64, // Moment of inertia about local Z
-    pub j: f64,  // Torsional constant
-    pub wy: f64, // Section modulus about local Y
-    pub wz: f64, // Section modulus about local Z
+    pub iy: f64,
+    pub iz: f64,
+    pub j: f64,
+    pub wy: f64,
+    pub wz: f64,
+    pub group_id: String,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct Load3D {
-    pub node_id: String,
-    pub fx: f64,
-    pub fy: f64,
-    pub fz: f64,
-    pub mx: f64,
-    pub my: f64,
-    pub mz: f64,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct DistributedLoad3D {
     pub element_id: String,
-    pub value: f64, // Uniform distributed load in N/m (negative downwards)
+    pub value: f64,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct InputModel3D {
+#[serde(rename_all = "camelCase")]
+pub struct Geometry3D {
     pub nodes: Vec<Node3D>,
     pub elements: Vec<Element3D>,
-    pub loads: Vec<Load3D>,
-    pub distributed_loads: Vec<DistributedLoad3D>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct InputModel3D {
+    pub geometry: Geometry3D,
+    pub loads: Vec<DistributedLoad3D>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ResultNode3D {
-    pub id: String,
-    pub ux: f64,
-    pub uy: f64,
-    pub uz: f64,
-    pub rx: f64,
-    pub ry: f64,
-    pub rz: f64,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ResultElement3D {
-    pub id: String,
-    pub fx_start: f64,
-    pub fy_start: f64,
-    pub fz_start: f64,
-    pub mx_start: f64,
-    pub my_start: f64,
-    pub mz_start: f64,
-    pub fx_end: f64,
-    pub fy_end: f64,
-    pub fz_end: f64,
-    pub mx_end: f64,
-    pub my_end: f64,
-    pub mz_end: f64,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct SolverOutput3D {
     pub success: bool,
     pub error: Option<String>,
-    pub nodes: Vec<ResultNode3D>,
-    pub elements: Vec<ResultElement3D>,
-    #[serde(rename = "utilization")]
-    pub element_utilization: std::collections::HashMap<String, Vec<f64>>,
+    pub displacements: std::collections::HashMap<String, Vec<f64>>,
+    pub reactions: std::collections::HashMap<String, Vec<f64>>,
+    pub utilization: std::collections::HashMap<String, Vec<f64>>,
 }
 
 pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
-    let n_nodes = input_model.nodes.len();
+    let n_nodes = input_model.geometry.nodes.len();
     if n_nodes < 2 {
         return SolverOutput3D {
             success: false,
             error: Some("The 3D model must have at least 2 nodes".to_string()),
-            nodes: vec![],
-            elements: vec![],
-            element_utilization: std::collections::HashMap::new(),
+            displacements: std::collections::HashMap::new(),
+            reactions: std::collections::HashMap::new(),
+            utilization: std::collections::HashMap::new(),
         };
     }
 
@@ -266,31 +237,19 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
     let mut k_global = DMatrix::<f64>::zeros(system_size, system_size);
     let mut f_global = DVector::<f64>::zeros(system_size);
 
-    // Apply nodal loads
-    for load in &input_model.loads {
-        if let Some(idx) = input_model.nodes.iter().position(|n| n.id == load.node_id) {
-            f_global[idx * 6 + 0] += load.fx;
-            f_global[idx * 6 + 1] += load.fy;
-            f_global[idx * 6 + 2] += load.fz;
-            f_global[idx * 6 + 3] += load.mx;
-            f_global[idx * 6 + 4] += load.my;
-            f_global[idx * 6 + 5] += load.mz;
-        }
-    }
-
     // Apply distributed element loads (Equivalent Nodal Forces)
-    for load in &input_model.distributed_loads {
-        let el_idx = match input_model.elements.iter().position(|e| e.id == load.element_id) {
+    for load in &input_model.loads {
+        let el_idx = match input_model.geometry.elements.iter().position(|e| e.id == load.element_id) {
             Some(idx) => idx,
             None => continue,
         };
-        let el = &input_model.elements[el_idx];
+        let el = &input_model.geometry.elements[el_idx];
 
-        let start_idx = input_model.nodes.iter().position(|n| n.id == el.start_node_id).unwrap();
-        let end_idx = input_model.nodes.iter().position(|n| n.id == el.end_node_id).unwrap();
+        let start_idx = input_model.geometry.nodes.iter().position(|n| n.id == el.start_node).unwrap();
+        let end_idx = input_model.geometry.nodes.iter().position(|n| n.id == el.end_node).unwrap();
 
-        let n1 = &input_model.nodes[start_idx];
-        let n2 = &input_model.nodes[end_idx];
+        let n1 = &input_model.geometry.nodes[start_idx];
+        let n2 = &input_model.geometry.nodes[end_idx];
 
         let dx = n2.x - n1.x;
         let dy = n2.y - n1.y;
@@ -301,19 +260,14 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             continue;
         }
 
-        // Angle alpha relative to horizontal plane
         let d_xz = (dx * dx + dz * dz).sqrt();
-        let cos_alpha = d_xz / l;
-        let sin_alpha = dy / l;
+        let cos_alpha = if l > 1e-9 { d_xz / l } else { 1.0 };
+        let sin_alpha = if l > 1e-9 { dy / l } else { 0.0 };
 
-        // Global downward vertical uniform load q (N/m)
         let q = load.value;
-
-        // Transform to local elements: y' causes bending, x' causes axial load
         let q_local_y = q * cos_alpha;
         let q_local_x = q * sin_alpha;
 
-        // Local equivalent nodal forces
         let f_y1 = q_local_y * l / 2.0;
         let m_z1 = q_local_y * l * l / 12.0;
         let f_y2 = q_local_y * l / 2.0;
@@ -330,7 +284,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         f_local[7] = f_y2;
         f_local[11] = m_z2;
 
-        // Rotation matrix r and T
         let mut r = nalgebra::Matrix3::<f64>::zeros();
         let vx = nalgebra::Vector3::new(dx / l, dy / l, dz / l);
         let vy: nalgebra::Vector3<f64>;
@@ -367,18 +320,18 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
     }
 
     // Element assembly
-    for el in &input_model.elements {
-        let start_idx = match input_model.nodes.iter().position(|n| n.id == el.start_node_id) {
+    for el in &input_model.geometry.elements {
+        let start_idx = match input_model.geometry.nodes.iter().position(|n| n.id == el.start_node) {
             Some(idx) => idx,
             None => continue,
         };
-        let end_idx = match input_model.nodes.iter().position(|n| n.id == el.end_node_id) {
+        let end_idx = match input_model.geometry.nodes.iter().position(|n| n.id == el.end_node) {
             Some(idx) => idx,
             None => continue,
         };
 
-        let n1 = &input_model.nodes[start_idx];
-        let n2 = &input_model.nodes[end_idx];
+        let n1 = &input_model.geometry.nodes[start_idx];
+        let n2 = &input_model.geometry.nodes[end_idx];
 
         let dx = n2.x - n1.x;
         let dy = n2.y - n1.y;
@@ -389,7 +342,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             continue;
         }
 
-        // Calculate rotation matrix R (3x3) using robust cross-product
         let mut r = nalgebra::Matrix3::<f64>::zeros();
         let vx = nalgebra::Vector3::new(dx / l, dy / l, dz / l);
         let vy: nalgebra::Vector3<f64>;
@@ -408,7 +360,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         r[(1, 0)] = vy.x; r[(1, 1)] = vy.y; r[(1, 2)] = vy.z;
         r[(2, 0)] = vz.x; r[(2, 1)] = vz.y; r[(2, 2)] = vz.z;
 
-        // Local 12x12 stiffness matrix
         let mut k_local = DMatrix::<f64>::zeros(12, 12);
         let e = el.e;
         let g = el.g;
@@ -420,21 +371,18 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         let l2 = l * l;
         let l3 = l2 * l;
 
-        // Axial
         let axial = e * area / l;
         k_local[(0, 0)] = axial;
         k_local[(0, 6)] = -axial;
         k_local[(6, 0)] = -axial;
         k_local[(6, 6)] = axial;
 
-        // Torsion
         let torsion = g * j / l;
         k_local[(3, 3)] = torsion;
         k_local[(3, 9)] = -torsion;
         k_local[(9, 3)] = -torsion;
         k_local[(9, 9)] = torsion;
 
-        // Z-bending (in local XY plane)
         let b_z_12 = 12.0 * e * iz / l3;
         let b_z_6 = 6.0 * e * iz / l2;
         let b_z_4 = 4.0 * e * iz / l;
@@ -445,7 +393,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         k_local[(7, 1)] = -b_z_12; k_local[(7, 5)] = -b_z_6;  k_local[(7, 7)] = b_z_12;  k_local[(7, 11)] = -b_z_6;
         k_local[(11, 1)] = b_z_6;  k_local[(11, 5)] = b_z_2;  k_local[(11, 7)] = -b_z_6; k_local[(11, 11)] = b_z_4;
 
-        // Y-bending (in local XZ plane)
         let b_y_12 = 12.0 * e * iy / l3;
         let b_y_6 = 6.0 * e * iy / l2;
         let b_y_4 = 4.0 * e * iy / l;
@@ -456,7 +403,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         k_local[(8, 2)] = -b_y_12;  k_local[(8, 4)] = b_y_6;   k_local[(8, 8)] = b_y_12;   k_local[(8, 10)] = b_y_6;
         k_local[(10, 2)] = -b_y_6;  k_local[(10, 4)] = b_y_2;  k_local[(10, 8)] = b_y_6;   k_local[(10, 10)] = b_y_4;
 
-        // Global transformation matrix T (12x12)
         let mut t = DMatrix::<f64>::zeros(12, 12);
         for i in 0..4 {
             t.fixed_view_mut::<3, 3>(i * 3, i * 3).copy_from(&r);
@@ -464,7 +410,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
 
         let k_global_el = t.transpose() * k_local * t;
 
-        // Assemble into global matrix
         let dof_map = [
             start_idx * 6 + 0, start_idx * 6 + 1, start_idx * 6 + 2, start_idx * 6 + 3, start_idx * 6 + 4, start_idx * 6 + 5,
             end_idx * 6 + 0, end_idx * 6 + 1, end_idx * 6 + 2, end_idx * 6 + 3, end_idx * 6 + 4, end_idx * 6 + 5,
@@ -477,16 +422,14 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         }
     }
 
-    // Boundary conditions
+    // Apply boundary conditions using 6-DOF support restraints
     let penalty = 1e12;
-    for (idx, node) in input_model.nodes.iter().enumerate() {
-        if node.support_type == "Fixed" {
+    for (idx, node) in input_model.geometry.nodes.iter().enumerate() {
+        if node.support_restraints.len() == 6 {
             for d in 0..6 {
-                k_global[(idx * 6 + d, idx * 6 + d)] += penalty;
-            }
-        } else if node.support_type == "Pinned" {
-            for d in 0..3 {
-                k_global[(idx * 6 + d, idx * 6 + d)] += penalty;
+                if node.support_restraints[d] {
+                    k_global[(idx * 6 + d, idx * 6 + d)] += penalty;
+                }
             }
         }
     }
@@ -498,36 +441,45 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             return SolverOutput3D {
                 success: false,
                 error: Some("Global 3D Stiffness Matrix is singular".to_string()),
-                nodes: vec![],
-                elements: vec![],
-                element_utilization: std::collections::HashMap::new(),
+                displacements: std::collections::HashMap::new(),
+                reactions: std::collections::HashMap::new(),
+                utilization: std::collections::HashMap::new(),
             };
         }
     };
 
-    let mut result_nodes = Vec::new();
-    for (idx, node) in input_model.nodes.iter().enumerate() {
-        result_nodes.push(ResultNode3D {
-            id: node.id.clone(),
-            ux: u_solved[idx * 6 + 0] * 1000.0, // convert to mm
-            uy: u_solved[idx * 6 + 1] * 1000.0, // convert to mm
-            uz: u_solved[idx * 6 + 2] * 1000.0, // convert to mm
-            rx: u_solved[idx * 6 + 3],
-            ry: u_solved[idx * 6 + 4],
-            rz: u_solved[idx * 6 + 5],
-        });
+    let mut displacements_map = std::collections::HashMap::new();
+    let mut reactions_map = std::collections::HashMap::new();
+
+    for (idx, node) in input_model.geometry.nodes.iter().enumerate() {
+        let ux = u_solved[idx * 6 + 0] * 1000.0; // mm
+        let uy = u_solved[idx * 6 + 1] * 1000.0;
+        let uz = u_solved[idx * 6 + 2] * 1000.0;
+        let rx = u_solved[idx * 6 + 3];
+        let ry = u_solved[idx * 6 + 4];
+        let rz = u_solved[idx * 6 + 5];
+        displacements_map.insert(node.id.clone(), vec![ux, uy, uz, rx, ry, rz]);
+
+        let mut node_reactions = vec![0.0; 6];
+        if node.support_restraints.len() == 6 {
+            for d in 0..6 {
+                if node.support_restraints[d] {
+                    node_reactions[d] = (u_solved[idx * 6 + d] * penalty) / 1000.0; // kN / kNm
+                }
+            }
+        }
+        reactions_map.insert(node.id.clone(), node_reactions);
     }
 
-    // Element internal forces at ends & 5-point utilization post-processing
-    let mut result_elements = Vec::new();
+    // Element utilization and forces
     let mut utilization_map = std::collections::HashMap::new();
 
-    for el in &input_model.elements {
-        let start_idx = input_model.nodes.iter().position(|n| n.id == el.start_node_id).unwrap();
-        let end_idx = input_model.nodes.iter().position(|n| n.id == el.end_node_id).unwrap();
+    for el in &input_model.geometry.elements {
+        let start_idx = input_model.geometry.nodes.iter().position(|n| n.id == el.start_node).unwrap();
+        let end_idx = input_model.geometry.nodes.iter().position(|n| n.id == el.end_node).unwrap();
 
-        let n1 = &input_model.nodes[start_idx];
-        let n2 = &input_model.nodes[end_idx];
+        let n1 = &input_model.geometry.nodes[start_idx];
+        let n2 = &input_model.geometry.nodes[end_idx];
 
         let dx = n2.x - n1.x;
         let dy = n2.y - n1.y;
@@ -538,7 +490,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             continue;
         }
 
-        // Calculate rotation matrix R using robust cross-product
         let mut r = nalgebra::Matrix3::<f64>::zeros();
         let vx = nalgebra::Vector3::new(dx / l, dy / l, dz / l);
         let vy: nalgebra::Vector3<f64>;
@@ -557,7 +508,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         r[(1, 0)] = vy.x; r[(1, 1)] = vy.y; r[(1, 2)] = vy.z;
         r[(2, 0)] = vz.x; r[(2, 1)] = vz.y; r[(2, 2)] = vz.z;
 
-        // Local displacement vector u_local_el
         let mut u_global_el = DVector::<f64>::zeros(12);
         for d in 0..6 {
             u_global_el[d] = u_solved[start_idx * 6 + d];
@@ -571,7 +521,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
 
         let u_local_el = &t * &u_global_el;
 
-        // Reconstruct local stiffness
         let mut k_local = DMatrix::<f64>::zeros(12, 12);
         let e = el.e;
         let g = el.g;
@@ -603,26 +552,10 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
 
         let f_local_el = &k_local * &u_local_el;
 
-        result_elements.push(ResultElement3D {
-            id: el.id.clone(),
-            fx_start: f_local_el[0] / 1000.0, // convert N to kN
-            fy_start: f_local_el[1] / 1000.0,
-            fz_start: f_local_el[2] / 1000.0,
-            mx_start: f_local_el[3] / 1000.0, // convert Nm to kNm
-            my_start: f_local_el[4] / 1000.0,
-            mz_start: f_local_el[5] / 1000.0,
-            fx_end: f_local_el[6] / 1000.0,
-            fy_end: f_local_el[7] / 1000.0,
-            fz_end: f_local_el[8] / 1000.0,
-            mx_end: f_local_el[9] / 1000.0,
-            my_end: f_local_el[10] / 1000.0,
-            mz_end: f_local_el[11] / 1000.0,
-        });
-
-        // 5-point Eurocode 3 calculation post-processing
+        // distributed load calculation
         let mut q_local_y = 0.0;
         let mut q_local_x = 0.0;
-        if let Some(load) = input_model.distributed_loads.iter().find(|l| l.element_id == el.id) {
+        if let Some(load) = input_model.loads.iter().find(|l| l.element_id == el.id) {
             let d_xz = (dx * dx + dz * dz).sqrt();
             let cos_alpha = if l > 1e-9 { d_xz / l } else { 1.0 };
             let sin_alpha = if l > 1e-9 { dy / l } else { 0.0 };
@@ -632,18 +565,22 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         }
 
         let mut utils_5 = Vec::new();
-        let fy = 235.0e6; // Yield strength in Pa (S235)
+        let fy = 235.0e6; // S235 yield strength in N/m^2 (Pa)
 
         for i in 0..5 {
             let xi = (i as f64) * 0.25 * l;
 
-            // Internal forces at xi
+            // Internal forces at control point xi
             let n_xi = -f_local_el[0] - q_local_x * xi;
             let mz_xi = -f_local_el[5] - f_local_el[1] * xi - q_local_y * xi * xi / 2.0;
             let my_xi = -f_local_el[4] + f_local_el[2] * xi;
 
-            // Eurocode 3 exact formula: util(x) = |N|/(0.6*A*fy) + |My|/(Wy*fy) + |Mz|/(Wz*fy)
-            let term_n = if (area > 0.0) && (fy > 0.0) { n_xi.abs() / (0.6 * area * fy) } else { 0.0 };
+            // Compression buckling reduction factor chi
+            let is_compressed = n_xi < 0.0;
+            let chi = if is_compressed { 0.6 } else { 1.0 };
+
+            // ULS Eurocode 3 calculation: util = |N| / (chi * A * fy) + |My| / (Wy * fy) + |Mz| / (Wz * fy)
+            let term_n = if (area > 0.0) && (fy > 0.0) { n_xi.abs() / (chi * area * fy) } else { 0.0 };
             let term_my = if (wy > 0.0) && (fy > 0.0) { my_xi.abs() / (wy * fy) } else { 0.0 };
             let term_wz = if (wz > 0.0) && (fy > 0.0) { mz_xi.abs() / (wz * fy) } else { 0.0 };
 
@@ -656,9 +593,9 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
     SolverOutput3D {
         success: true,
         error: None,
-        nodes: result_nodes,
-        elements: result_elements,
-        element_utilization: utilization_map,
+        displacements: displacements_map,
+        reactions: reactions_map,
+        utilization: utilization_map,
     }
 }
 
@@ -670,9 +607,9 @@ pub fn solve_mesh_3d(input_val: JsValue) -> JsValue {
             let err_output = SolverOutput3D {
                 success: false,
                 error: Some(format!("Failed to parse 3D input model from JS: {}", e)),
-                nodes: vec![],
-                elements: vec![],
-                element_utilization: std::collections::HashMap::new(),
+                displacements: std::collections::HashMap::new(),
+                reactions: std::collections::HashMap::new(),
+                utilization: std::collections::HashMap::new(),
             };
             return serde_wasm_bindgen::to_value(&err_output).unwrap();
         }
