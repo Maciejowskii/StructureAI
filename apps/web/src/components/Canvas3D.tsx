@@ -271,31 +271,72 @@ export default function Canvas3D({ model, result, deformationScale }: Canvas3DPr
         ctx.stroke();
         ctx.setLineDash([]); // Reset
 
-        // Fetch utilization from Rust solver result
-        const utilization = result?.utilization?.[el.id];
+        // Fetch utilization array from Rust solver result
+        const uArray = result?.utilization?.[el.id]; // number[] (5 points)
 
-        let strokeStyle = isBrace 
-          ? `hsla(24, 95%, 53%, ${brightness})` 
-          : isPurlin 
-            ? `hsla(217, 91%, 60%, ${brightness * 0.8})` 
-            : `hsla(271, 91%, 65%, ${brightness})`;
-        let shadowColor = isBrace ? '#f97316' : isPurlin ? '#3b82f6' : '#a855f7';
-        let blurSize = 8;
+        let strokeStyle: string | CanvasGradient;
+        let shadowColor = '#3b82f6';
+        let blurSize = 6;
 
-        if (utilization !== undefined) {
-          if (utilization <= 0.5) {
-            strokeStyle = `hsla(142, 72%, 45%, ${brightness})`; // green
-            shadowColor = '#10b981';
-          } else if (utilization <= 1.0) {
-            strokeStyle = `hsla(37, 95%, 50%, ${brightness})`; // orange
-            shadowColor = '#f59e0b';
-          } else {
-            // Pulsing intensive red for overloaded members
-            const redPulse = 0.65 + 0.35 * Math.sin(pulseTime * 0.008);
-            strokeStyle = `hsla(0, 95%, 50%, ${brightness * redPulse})`;
-            shadowColor = '#ef4444';
-            blurSize = 12 * (0.8 + 0.4 * Math.sin(pulseTime * 0.008));
+        // Scientific-grade color mapping function
+        const getColorForUtilization = (u: number, b: number) => {
+          if (u <= 0.0) return `hsla(217, 91%, 60%, ${b})`; // Deep blue
+          if (u <= 0.3) {
+            // Lerp between Blue (217) and Sea Green (142)
+            const t = u / 0.3;
+            const h = 217 - t * (217 - 142);
+            const s = 91 - t * (91 - 70);
+            const l = 60 - t * (60 - 45);
+            return `hsla(${h.toFixed(0)}, ${s.toFixed(0)}%, ${l.toFixed(0)}%, ${b})`;
           }
+          if (u <= 0.7) {
+            // Lerp between Sea Green (142) and Yellow/Orange (45)
+            const t = (u - 0.3) / 0.4;
+            const h = 142 - t * (142 - 45);
+            const s = 70 + t * (93 - 70);
+            const l = 45 + t * (47 - 45);
+            return `hsla(${h.toFixed(0)}, ${s.toFixed(0)}%, ${l.toFixed(0)}%, ${b})`;
+          }
+          if (u <= 1.0) {
+            // Lerp between Yellow/Orange (45) and Red (0)
+            const t = (u - 0.7) / 0.3;
+            const h = 45 - t * 45;
+            const s = 93 - t * (93 - 84);
+            const l = 47 + t * (60 - 47);
+            return `hsla(${h.toFixed(0)}, ${s.toFixed(0)}%, ${l.toFixed(0)}%, ${b})`;
+          }
+          // Pulsing intensive red for overloads
+          const redPulse = 0.65 + 0.35 * Math.sin(pulseTime * 0.008);
+          return `hsla(0, 84%, 60%, ${b * redPulse})`;
+        };
+
+        if (uArray && uArray.length === 5) {
+          const maxU = Math.max(...uArray);
+          if (maxU <= 0.3) shadowColor = '#3b82f6';
+          else if (maxU <= 0.5) shadowColor = '#10b981';
+          else if (maxU <= 1.0) shadowColor = '#eab308';
+          else {
+            shadowColor = '#ef4444';
+            blurSize = 10 * (0.8 + 0.4 * Math.sin(pulseTime * 0.008));
+          }
+
+          // Create dynamic linear gradient along element
+          const grad = ctx.createLinearGradient(dp1.x, dp1.y, dp2.x, dp2.y);
+          grad.addColorStop(0.0, getColorForUtilization(uArray[0], brightness));
+          grad.addColorStop(0.25, getColorForUtilization(uArray[1], brightness));
+          grad.addColorStop(0.50, getColorForUtilization(uArray[2], brightness));
+          grad.addColorStop(0.75, getColorForUtilization(uArray[3], brightness));
+          grad.addColorStop(1.0, getColorForUtilization(uArray[4], brightness));
+          strokeStyle = grad;
+        } else {
+          // Default styling (when result is not yet available)
+          shadowColor = isBrace ? '#f97316' : isPurlin ? '#3b82f6' : '#a855f7';
+          strokeStyle = isBrace 
+            ? `hsla(24, 95%, 53%, ${brightness})` 
+            : isPurlin 
+              ? `hsla(217, 91%, 60%, ${brightness * 0.8})` 
+              : `hsla(271, 91%, 65%, ${brightness})`;
+          blurSize = 8;
         }
 
         // Draw deformed structure member (main glowing view)
@@ -303,7 +344,8 @@ export default function Canvas3D({ model, result, deformationScale }: Canvas3DPr
         ctx.shadowBlur = result ? blurSize * brightness : 0;
         ctx.strokeStyle = strokeStyle;
 
-        ctx.lineWidth = isBrace ? 2 : isPurlin ? 2.5 : 4;
+        // Slightly thicker profiles for scientific stress heatmap readability
+        ctx.lineWidth = isBrace ? 3 : isPurlin ? 3.5 : 5.5;
         ctx.beginPath();
         ctx.moveTo(dp1.x, dp1.y);
         ctx.lineTo(dp2.x, dp2.y);
@@ -446,7 +488,7 @@ export default function Canvas3D({ model, result, deformationScale }: Canvas3DPr
         )}
       </div>
 
-      {/* Elegant Glassmorphism Utilization Legend Box */}
+      {/* Elegant Glassmorphism Stress Heatmap Legend Box */}
       <div style={{
         position: 'absolute',
         top: '240px',
@@ -455,31 +497,46 @@ export default function Canvas3D({ model, result, deformationScale }: Canvas3DPr
         backdropFilter: 'blur(10px)',
         WebkitBackdropFilter: 'blur(10px)',
         border: '1px solid rgba(139, 92, 246, 0.25)',
-        padding: '12px 16px',
+        padding: '16px',
         borderRadius: '12px',
         boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.5)',
         width: '260px',
         color: '#f8fafc',
         pointerEvents: 'none'
       }}>
-        <div style={{ fontWeight: 'bold', fontSize: '11px', color: '#c4b5fd', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <span>📊</span> Mapa Wytężenia (Eurokod 3)
+        <div style={{ fontWeight: 'bold', fontSize: '11px', color: '#c4b5fd', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span>📊</span> Heatmapa Wytężenia SGN (EC3)
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '10.5px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 6px #10b981' }}></span>
-            <span style={{ color: '#94a3b8' }}>Bezpieczny:</span>
-            <span style={{ color: '#10b981', fontWeight: '600' }}>&le; 50%</span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', background: '#f59e0b', boxShadow: '0 0 6px #f59e0b' }}></span>
-            <span style={{ color: '#94a3b8' }}>Optymalny:</span>
-            <span style={{ color: '#f59e0b', fontWeight: '600' }}>50% - 100%</span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', background: '#ef4444', boxShadow: '0 0 6px #ef4444' }}></span>
-            <span style={{ color: '#94a3b8' }}>Przeciążony:</span>
-            <span style={{ color: '#ef4444', fontWeight: '600', animation: 'pulse 1s infinite alternate' }}>&gt; 100% (Katastrofa)</span>
+        
+        <div style={{ display: 'flex', alignItems: 'stretch', gap: '16px' }}>
+          {/* Vertical gradient bar */}
+          <div style={{
+            width: '14px',
+            height: '150px',
+            borderRadius: '6px',
+            background: 'linear-gradient(to top, #3b82f6 0%, #10b981 25%, #eab308 65%, #ef4444 100%)',
+            boxShadow: '0 0 10px rgba(139, 92, 246, 0.2)',
+            position: 'relative'
+          }} />
+
+          {/* Numerical labels matching the vertical gradient bar */}
+          <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '10.5px', height: '150px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-start' }}>
+              <span style={{ color: '#ef4444', fontWeight: 'bold' }}>&ge; 1.0 (Limit nośności SGN)</span>
+              <span style={{ color: '#64748b', fontSize: '9px' }}>Przeciążenie, ryzyko katastrofy</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              <span style={{ color: '#eab308', fontWeight: '600' }}>0.7 (Optymalny)</span>
+              <span style={{ color: '#64748b', fontSize: '9px' }}>Wysoka efektywność materiałowa</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              <span style={{ color: '#10b981', fontWeight: '600' }}>0.3 - 0.5 (Bezpieczny)</span>
+              <span style={{ color: '#64748b', fontSize: '9px' }}>Duży zapas nośności</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
+              <span style={{ color: '#3b82f6', fontWeight: '600' }}>0.0 (Brak obciążenia)</span>
+              <span style={{ color: '#64748b', fontSize: '9px' }}>Stan bezprężeniowy</span>
+            </div>
           </div>
         </div>
       </div>

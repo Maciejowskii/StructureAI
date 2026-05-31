@@ -247,7 +247,7 @@ pub struct SolverOutput3D {
     pub nodes: Vec<ResultNode3D>,
     pub elements: Vec<ResultElement3D>,
     #[serde(rename = "utilization")]
-    pub element_utilization: std::collections::HashMap<String, f64>,
+    pub element_utilization: std::collections::HashMap<String, Vec<f64>>,
 }
 
 pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
@@ -518,8 +518,10 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         });
     }
 
-    // Element internal forces at ends
+    // Element internal forces at ends & 5-point utilization post-processing
     let mut result_elements = Vec::new();
+    let mut utilization_map = std::collections::HashMap::new();
+
     for el in &input_model.elements {
         let start_idx = input_model.nodes.iter().position(|n| n.id == el.start_node_id).unwrap();
         let end_idx = input_model.nodes.iter().position(|n| n.id == el.end_node_id).unwrap();
@@ -531,6 +533,10 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         let dy = n2.y - n1.y;
         let dz = n2.z - n1.z;
         let l = (dx * dx + dy * dy + dz * dz).sqrt();
+
+        if l < 1e-9 {
+            continue;
+        }
 
         // Calculate rotation matrix R using robust cross-product
         let mut r = nalgebra::Matrix3::<f64>::zeros();
@@ -573,6 +579,8 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         let iy = el.iy;
         let iz = el.iz;
         let j = el.j;
+        let wy = el.wy;
+        let wz = el.wz;
         let l2 = l * l;
         let l3 = l2 * l;
 
@@ -610,37 +618,43 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             my_end: f_local_el[10] / 1000.0,
             mz_end: f_local_el[11] / 1000.0,
         });
-    }
 
-    let mut utilization_map = std::collections::HashMap::new();
-    for el in &input_model.elements {
-        let res_el = match result_elements.iter().find(|r| r.id == el.id) {
-            Some(r) => r,
-            None => continue,
-        };
+        // 5-point Eurocode 3 calculation post-processing
+        let mut q_local_y = 0.0;
+        let mut q_local_x = 0.0;
+        if let Some(load) = input_model.distributed_loads.iter().find(|l| l.element_id == el.id) {
+            let d_xz = (dx * dx + dz * dz).sqrt();
+            let cos_alpha = if l > 1e-9 { d_xz / l } else { 1.0 };
+            let sin_alpha = if l > 1e-9 { dy / l } else { 0.0 };
+            let q = load.value;
+            q_local_y = q * cos_alpha;
+            q_local_x = q * sin_alpha;
+        }
 
-        // Standard S235 steel grade yield strength: 235 MPa
+        let mut utils_5 = Vec::new();
         let fy = 235.0e6;
 
-        // Max absolute internal forces from ends
-        let n_force = (res_el.fx_start.abs().max(res_el.fx_end.abs())) * 1000.0; // N
-        let my_moment = (res_el.my_start.abs().max(res_el.my_end.abs())) * 1000.0; // Nm
-        let mz_moment = (res_el.mz_start.abs().max(res_el.mz_end.abs())) * 1000.0; // Nm
+        for i in 0..5 {
+            let xi = (i as f64) * 0.25 * l;
 
-        // Compressional buckling coefficient chi = 0.6 if ściskany (N < 0)
-        let is_compressed = res_el.fx_start < 0.0 || res_el.fx_end < 0.0;
-        let axial_cap = if is_compressed {
-            0.6 * el.area * fy
-        } else {
-            el.area * fy
-        };
+            // Internal forces at xi
+            let n_xi = -f_local_el[0] - q_local_x * xi;
+            let mz_xi = -f_local_el[5] - f_local_el[1] * xi - q_local_y * xi * xi / 2.0;
+            let my_xi = -f_local_el[4] + f_local_el[2] * xi;
 
-        let term_n = if axial_cap > 0.0 { n_force / axial_cap } else { 0.0 };
-        let term_my = if (el.wy > 0.0) && (fy > 0.0) { my_moment / (el.wy * fy) } else { 0.0 };
-        let term_mz = if (el.wz > 0.0) && (fy > 0.0) { mz_moment / (el.wz * fy) } else { 0.0 };
+            // ULS EC3 Check
+            let is_compressed = n_xi < 0.0;
+            let chi = if is_compressed { 0.6 } else { 1.0 };
+            let axial_cap = chi * area * fy;
 
-        let el_util = term_n + term_my + term_mz;
-        utilization_map.insert(el.id.clone(), el_util);
+            let term_n = if axial_cap > 0.0 { n_xi.abs() / axial_cap } else { 0.0 };
+            let term_my = if (wy > 0.0) && (fy > 0.0) { my_xi.abs() / (wy * fy) } else { 0.0 };
+            let term_wz = if (wz > 0.0) && (fy > 0.0) { mz_xi.abs() / (wz * fy) } else { 0.0 };
+
+            let util = term_n + term_my + term_wz;
+            utils_5.push(util);
+        }
+        utilization_map.insert(el.id.clone(), utils_5);
     }
 
     SolverOutput3D {
