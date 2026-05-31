@@ -209,8 +209,10 @@ export default function App() {
   const [deformationScale, setDeformationScale] = useState(100);
   const [results3D, setResults3D] = useState<any | null>(null);
   const [inputModel3D, setInputModel3D] = useState<any | null>(null);
+  const [freeModel3D, setFreeModel3D] = useState<any | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<{type: 'node' | 'element', id: string} | null>(null);
   const [workMode3D, setWorkMode3D] = useState<'parametric' | 'free_cad'>('parametric');
+  const activeModel3D = workMode3D === 'free_cad' ? freeModel3D : inputModel3D;
 
   // Initialize WASM
   useEffect(() => {
@@ -670,111 +672,132 @@ export default function App() {
     }
   }, [appMode, width3D, height3D, slope3D, length3D, bays3D, columnSection, rafterSection, bracingSection, generateParametricModel3D]);
 
+  // Synchronizacja przy przełączeniu trybu pracy 3D
+  useEffect(() => {
+    if (workMode3D === 'free_cad') {
+      const bayLength = length3D / bays3D;
+      const currentParametric = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D);
+      setFreeModel3D(currentParametric);
+    }
+  }, [workMode3D, width3D, height3D, slope3D, length3D, bays3D, generateParametricModel3D]);
+
   // Reactive MES 3D solver runs automatically when model updates
   useEffect(() => {
-    if (appMode === '3d' && inputModel3D) {
-      solve3D(inputModel3D);
+    if (appMode === '3d' && activeModel3D) {
+      solve3D(activeModel3D);
     }
-  }, [appMode, inputModel3D]);
+  }, [appMode, activeModel3D]);
 
   // Safe entity lookup helpers
   const getNode = (id: string) => {
-    return inputModel3D?.geometry?.nodes.find((n: any) => n.id === id) || { x: 0, y: 0, z: 0, supportRestraints: [false, false, false, false, false, false] };
+    return activeModel3D?.geometry?.nodes.find((n: any) => n.id === id) || { x: 0, y: 0, z: 0, supportRestraints: [false, false, false, false, false, false] };
   };
 
   const getElement = (id: string) => {
-    return inputModel3D?.geometry?.elements.find((el: any) => el.id === id) || { sectionId: 'IPE220' };
+    return activeModel3D?.geometry?.elements.find((el: any) => el.id === id) || { sectionId: 'IPE220' };
   };
 
   // Node editing handlers
-  const updateNodeCoord = (nodeId: string, axis: 'x' | 'y' | 'z', val: number) => {
-    if (!inputModel3D) return;
-    const updatedNodes = inputModel3D.geometry.nodes.map((n: any) => {
-      if (n.id === nodeId) {
-        return { ...n, [axis]: val || 0.0 };
-      }
-      return n;
-    });
-    setInputModel3D({
-      ...inputModel3D,
-      geometry: { ...inputModel3D.geometry, nodes: updatedNodes }
+  const updateNodeCoord = (nodeId: string, axis: 'x' | 'y' | 'z', value: number) => {
+    setFreeModel3D((prev: any) => {
+      if (!prev) return prev;
+      const updatedNodes = prev.geometry.nodes.map((n: any) => 
+        n.id === nodeId ? { ...n, [axis]: value } : n
+      );
+      return {
+        ...prev,
+        geometry: { ...prev.geometry, nodes: updatedNodes }
+      };
     });
   };
 
-  const toggleRestraint = (nodeId: string, restraintIdx: number) => {
-    if (!inputModel3D) return;
-    const updatedNodes = inputModel3D.geometry.nodes.map((n: any) => {
-      if (n.id === nodeId) {
-        const restraints = [...(n.supportRestraints || [false, false, false, false, false, false])];
-        restraints[restraintIdx] = !restraints[restraintIdx];
-        return { ...n, supportRestraints: restraints };
-      }
-      return n;
-    });
-    setInputModel3D({
-      ...inputModel3D,
-      geometry: { ...inputModel3D.geometry, nodes: updatedNodes }
+  const toggleRestraint = (nodeId: string, dofIdx: number) => {
+    setFreeModel3D((prev: any) => {
+      if (!prev) return prev;
+      const updatedNodes = prev.geometry.nodes.map((n: any) => {
+        if (n.id === nodeId) {
+          const restraints = [...(n.supportRestraints || [false, false, false, false, false, false])];
+          restraints[dofIdx] = !restraints[dofIdx];
+          return { ...n, supportRestraints: restraints };
+        }
+        return n;
+      });
+      return {
+        ...prev,
+        geometry: { ...prev.geometry, nodes: updatedNodes }
+      };
     });
   };
 
   // Element profile editing handler
-  const updateElementProfile = (elementId: string, profileKey: string) => {
-    if (!inputModel3D) return;
-    const profileProps = STEEL_PROFILES_3D[profileKey];
-    if (!profileProps) return;
-    const updatedElements = inputModel3D.geometry.elements.map((el: any) => {
-      if (el.id === elementId) {
-        return { ...el, ...profileProps, sectionId: profileKey };
-      }
-      return el;
-    });
-    setInputModel3D({
-      ...inputModel3D,
-      geometry: { ...inputModel3D.geometry, elements: updatedElements }
+  const updateElementProfile = (elementId: string, sectionId: string) => {
+    const props = STEEL_PROFILES_3D[sectionId];
+    if (!props) return;
+    setFreeModel3D((prev: any) => {
+      if (!prev) return prev;
+      const updatedElements = prev.geometry.elements.map((el: any) => 
+        el.id === elementId ? {
+          ...el,
+          sectionId,
+          iy: props.iy * 1e-8,
+          iz: props.iz * 1e-8,
+          area: props.area * 1e-4,
+          wy: props.wy * 1e-6,
+          wz: props.wz * 1e-6
+        } : el
+      );
+      return {
+        ...prev,
+        geometry: { ...prev.geometry, elements: updatedElements }
+      };
     });
   };
 
   // Delete element or node and its connections
   const removeElement = (elementId: string) => {
-    if (!inputModel3D) return;
-    const updatedElements = inputModel3D.geometry.elements.filter((el: any) => el.id !== elementId);
-    setInputModel3D({
-      ...inputModel3D,
-      geometry: { ...inputModel3D.geometry, elements: updatedElements }
+    setFreeModel3D((prev: any) => {
+      if (!prev) return prev;
+      const updatedElements = prev.geometry.elements.filter((el: any) => el.id !== elementId);
+      return {
+        ...prev,
+        geometry: { ...prev.geometry, elements: updatedElements }
+      };
     });
     setSelectedEntity(null);
   };
 
   // Drag and draw element insertion callback
   const handleAddElement3D = (startNodeId: string, endNodeId: string) => {
-    if (!inputModel3D) return;
-    const exists = inputModel3D.geometry.elements.some(
-      (el: any) => 
-        (el.startNode === startNodeId && el.endNode === endNodeId) ||
-        (el.startNode === endNodeId && el.endNode === startNodeId)
-    );
-    if (exists) return;
+    setFreeModel3D((prev: any) => {
+      if (!prev) return prev;
+      const exists = prev.geometry.elements.some(
+        (el: any) => 
+          (el.startNode === startNodeId && el.endNode === endNodeId) ||
+          (el.startNode === endNodeId && el.endNode === startNodeId)
+      );
+      if (exists) return prev;
 
-    const newId = `Beam_${Date.now()}`;
-    const defaultProps = STEEL_PROFILES_3D[rafterSection] || STEEL_PROFILES_3D['IPE220'];
-    const newElement = {
-      id: newId,
-      startNode: startNodeId,
-      endNode: endNodeId,
-      e: 210e9,
-      g: 80e9,
-      ...defaultProps,
-      j: defaultProps.j || 1.0e-8,
-      sectionId: rafterSection,
-      groupId: "rafters"
-    };
+      const newId = `Beam_${Date.now()}`;
+      const defaultProps = STEEL_PROFILES_3D[rafterSection] || STEEL_PROFILES_3D['IPE220'];
+      const newElement = {
+        id: newId,
+        startNode: startNodeId,
+        endNode: endNodeId,
+        e: 210e9,
+        g: 80e9,
+        ...defaultProps,
+        j: defaultProps.j || 1.0e-8,
+        sectionId: rafterSection,
+        groupId: "rafters"
+      };
 
-    setInputModel3D({
-      ...inputModel3D,
-      geometry: {
-        ...inputModel3D.geometry,
-        elements: [...inputModel3D.geometry.elements, newElement]
-      }
+      return {
+        ...prev,
+        geometry: {
+          ...prev.geometry,
+          elements: [...prev.geometry.elements, newElement]
+        }
+      };
     });
   };
 
