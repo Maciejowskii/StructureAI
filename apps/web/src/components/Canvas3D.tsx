@@ -3,13 +3,26 @@ import { useRef, useEffect, useState } from 'react';
 interface Canvas3DProps {
   model: any | null;
   result: any | null;
+  deformationScale: number;
 }
 
-export default function Canvas3D({ model, result }: Canvas3DProps) {
+export default function Canvas3D({ model, result, deformationScale }: Canvas3DProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [angleX, setAngleX] = useState(-0.6); // Rotation around Y
   const [angleY, setAngleY] = useState(0.3);  // Rotation around X
   const [zoom, setZoom] = useState(1.1);
+  const [pulseTime, setPulseTime] = useState(0);
+
+  // Redraw tick for pulsing animation
+  useEffect(() => {
+    let animFrameId: number;
+    const updatePulse = () => {
+      setPulseTime(Date.now());
+      animFrameId = requestAnimationFrame(updatePulse);
+    };
+    animFrameId = requestAnimationFrame(updatePulse);
+    return () => cancelAnimationFrame(animFrameId);
+  }, []);
 
   // Drag interaction logic
   useEffect(() => {
@@ -216,8 +229,8 @@ export default function Canvas3D({ model, result }: Canvas3DProps) {
           const resN1 = result.nodes.find((rn: any) => rn.id === n1.id);
           const resN2 = result.nodes.find((rn: any) => rn.id === n2.id);
           if (resN1 && resN2) {
-            // Apply exaggeration scale of 100 for displacements visual clarity
-            const exag = 100.0;
+            // Apply exaggeration scale with dynamic deformationScale slider (100% is 100.0)
+            const exag = 100.0 * (deformationScale / 100.0);
             dp1 = project(
               (n1.x + (resN1.ux / 1000.0) * exag - midX) * scaleFactor,
               (n1.y + (resN1.uy / 1000.0) * exag - midY) * scaleFactor,
@@ -258,16 +271,37 @@ export default function Canvas3D({ model, result }: Canvas3DProps) {
         ctx.stroke();
         ctx.setLineDash([]); // Reset
 
-        // Draw deformed structure member (main glowing view)
-        ctx.shadowColor = isBrace ? '#f97316' : isPurlin ? '#3b82f6' : '#a855f7';
-        ctx.shadowBlur = result ? 8 * brightness : 0;
-        
-        // HSL tailored palette
-        ctx.strokeStyle = isBrace 
+        // Fetch utilization from Rust solver result
+        const utilization = result?.utilization?.[el.id];
+
+        let strokeStyle = isBrace 
           ? `hsla(24, 95%, 53%, ${brightness})` 
           : isPurlin 
             ? `hsla(217, 91%, 60%, ${brightness * 0.8})` 
             : `hsla(271, 91%, 65%, ${brightness})`;
+        let shadowColor = isBrace ? '#f97316' : isPurlin ? '#3b82f6' : '#a855f7';
+        let blurSize = 8;
+
+        if (utilization !== undefined) {
+          if (utilization <= 0.5) {
+            strokeStyle = `hsla(142, 72%, 45%, ${brightness})`; // green
+            shadowColor = '#10b981';
+          } else if (utilization <= 1.0) {
+            strokeStyle = `hsla(37, 95%, 50%, ${brightness})`; // orange
+            shadowColor = '#f59e0b';
+          } else {
+            // Pulsing intensive red for overloaded members
+            const redPulse = 0.65 + 0.35 * Math.sin(pulseTime * 0.008);
+            strokeStyle = `hsla(0, 95%, 50%, ${brightness * redPulse})`;
+            shadowColor = '#ef4444';
+            blurSize = 12 * (0.8 + 0.4 * Math.sin(pulseTime * 0.008));
+          }
+        }
+
+        // Draw deformed structure member (main glowing view)
+        ctx.shadowColor = shadowColor;
+        ctx.shadowBlur = result ? blurSize * brightness : 0;
+        ctx.strokeStyle = strokeStyle;
 
         ctx.lineWidth = isBrace ? 2 : isPurlin ? 2.5 : 4;
         ctx.beginPath();
@@ -351,7 +385,7 @@ export default function Canvas3D({ model, result }: Canvas3DProps) {
       });
     }
 
-  }, [model, result, angleX, angleY, zoom]);
+  }, [model, result, angleX, angleY, zoom, deformationScale, pulseTime]);
 
   const maxDisp = result && result.nodes && result.nodes.length > 0
     ? Math.max(...result.nodes.map((rn: any) => Math.sqrt(rn.ux*rn.ux + rn.uy*rn.uy + rn.uz*rn.uz)))
@@ -410,6 +444,44 @@ export default function Canvas3D({ model, result }: Canvas3DProps) {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Elegant Glassmorphism Utilization Legend Box */}
+      <div style={{
+        position: 'absolute',
+        top: '240px',
+        left: '20px',
+        background: 'rgba(15, 23, 42, 0.85)',
+        backdropFilter: 'blur(10px)',
+        WebkitBackdropFilter: 'blur(10px)',
+        border: '1px solid rgba(139, 92, 246, 0.25)',
+        padding: '12px 16px',
+        borderRadius: '12px',
+        boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.5)',
+        width: '260px',
+        color: '#f8fafc',
+        pointerEvents: 'none'
+      }}>
+        <div style={{ fontWeight: 'bold', fontSize: '11px', color: '#c4b5fd', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span>📊</span> Mapa Wytężenia (Eurokod 3)
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '10.5px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 6px #10b981' }}></span>
+            <span style={{ color: '#94a3b8' }}>Bezpieczny:</span>
+            <span style={{ color: '#10b981', fontWeight: '600' }}>&le; 50%</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', background: '#f59e0b', boxShadow: '0 0 6px #f59e0b' }}></span>
+            <span style={{ color: '#94a3b8' }}>Optymalny:</span>
+            <span style={{ color: '#f59e0b', fontWeight: '600' }}>50% - 100%</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', background: '#ef4444', boxShadow: '0 0 6px #ef4444' }}></span>
+            <span style={{ color: '#94a3b8' }}>Przeciążony:</span>
+            <span style={{ color: '#ef4444', fontWeight: '600', animation: 'pulse 1s infinite alternate' }}>&gt; 100% (Katastrofa)</span>
+          </div>
+        </div>
       </div>
 
       {/* Control instructions bottom-right */}

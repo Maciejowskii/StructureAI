@@ -183,6 +183,8 @@ pub struct Element3D {
     pub iy: f64, // Moment of inertia about local Y
     pub iz: f64, // Moment of inertia about local Z
     pub j: f64,  // Torsional constant
+    pub wy: f64, // Section modulus about local Y
+    pub wz: f64, // Section modulus about local Z
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -244,6 +246,8 @@ pub struct SolverOutput3D {
     pub error: Option<String>,
     pub nodes: Vec<ResultNode3D>,
     pub elements: Vec<ResultElement3D>,
+    #[serde(rename = "utilization")]
+    pub element_utilization: std::collections::HashMap<String, f64>,
 }
 
 pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
@@ -254,6 +258,7 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             error: Some("The 3D model must have at least 2 nodes".to_string()),
             nodes: vec![],
             elements: vec![],
+            element_utilization: std::collections::HashMap::new(),
         };
     }
 
@@ -495,6 +500,7 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
                 error: Some("Global 3D Stiffness Matrix is singular".to_string()),
                 nodes: vec![],
                 elements: vec![],
+                element_utilization: std::collections::HashMap::new(),
             };
         }
     };
@@ -606,11 +612,43 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         });
     }
 
+    let mut utilization_map = std::collections::HashMap::new();
+    for el in &input_model.elements {
+        let res_el = match result_elements.iter().find(|r| r.id == el.id) {
+            Some(r) => r,
+            None => continue,
+        };
+
+        // Standard S235 steel grade yield strength: 235 MPa
+        let fy = 235.0e6;
+
+        // Max absolute internal forces from ends
+        let n_force = (res_el.fx_start.abs().max(res_el.fx_end.abs())) * 1000.0; // N
+        let my_moment = (res_el.my_start.abs().max(res_el.my_end.abs())) * 1000.0; // Nm
+        let mz_moment = (res_el.mz_start.abs().max(res_el.mz_end.abs())) * 1000.0; // Nm
+
+        // Compressional buckling coefficient chi = 0.6 if ściskany (N < 0)
+        let is_compressed = res_el.fx_start < 0.0 || res_el.fx_end < 0.0;
+        let axial_cap = if is_compressed {
+            0.6 * el.area * fy
+        } else {
+            el.area * fy
+        };
+
+        let term_n = if axial_cap > 0.0 { n_force / axial_cap } else { 0.0 };
+        let term_my = if (el.wy > 0.0) && (fy > 0.0) { my_moment / (el.wy * fy) } else { 0.0 };
+        let term_mz = if (el.wz > 0.0) && (fy > 0.0) { mz_moment / (el.wz * fy) } else { 0.0 };
+
+        let el_util = term_n + term_my + term_mz;
+        utilization_map.insert(el.id.clone(), el_util);
+    }
+
     SolverOutput3D {
         success: true,
         error: None,
         nodes: result_nodes,
         elements: result_elements,
+        element_utilization: utilization_map,
     }
 }
 
@@ -624,6 +662,7 @@ pub fn solve_mesh_3d(input_val: JsValue) -> JsValue {
                 error: Some(format!("Failed to parse 3D input model from JS: {}", e)),
                 nodes: vec![],
                 elements: vec![],
+                element_utilization: std::collections::HashMap::new(),
             };
             return serde_wasm_bindgen::to_value(&err_output).unwrap();
         }
@@ -1297,6 +1336,8 @@ mod tests {
                 iy: 1.42e-6,
                 iz: 1.943e-5,
                 j: 7e-8,
+                wy: 1.0e-5,
+                wz: 1.0e-4,
             }
         ];
         let loads = vec![

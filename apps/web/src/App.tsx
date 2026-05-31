@@ -140,6 +140,33 @@ interface Support {
 export type ToolMode = 'select' | 'draw_beam' | 'add_point_load' | 'add_support_pinned' | 'add_support_roller' | 'add_support_fixed';
 export type AppMode = '2d' | '3d';
 
+export const STEEL_PROFILES_3D: Record<string, { area: number, iy: number, iz: number, j: number, wy: number, wz: number }> = {
+  'IPE100': { area: 10.3e-4, iz: 171e-8, iy: 15.9e-8, j: 1.2e-8, wz: 34.2e-6, wy: 5.79e-6 },
+  'IPE120': { area: 13.2e-4, iz: 318e-8, iy: 27.7e-8, j: 1.74e-8, wz: 53.0e-6, wy: 8.65e-6 },
+  'IPE140': { area: 16.4e-4, iz: 541e-8, iy: 44.9e-8, j: 2.45e-8, wz: 77.3e-6, wy: 12.3e-6 },
+  'IPE160': { area: 20.1e-4, iz: 869e-8, iy: 68.3e-8, j: 3.6e-8, wz: 109e-6, wy: 16.7e-6 },
+  'IPE180': { area: 23.9e-4, iz: 1317e-8, iy: 101e-8, j: 4.79e-8, wz: 146e-6, wy: 22.2e-6 },
+  'IPE200': { area: 28.5e-4, iz: 1943e-8, iy: 142e-8, j: 6.98e-8, wz: 194e-6, wy: 28.5e-6 },
+  'IPE220': { area: 33.4e-4, iz: 2772e-8, iy: 205e-8, j: 9.07e-8, wz: 252e-6, wy: 37.3e-6 },
+  'IPE240': { area: 39.1e-4, iz: 3892e-8, iy: 284e-8, j: 12.9e-8, wz: 324e-6, wy: 47.3e-6 },
+  'IPE270': { area: 45.9e-4, iz: 5790e-8, iy: 420e-8, j: 15.9e-8, wz: 429e-6, wy: 62.2e-6 },
+  'IPE300': { area: 53.8e-4, iz: 8356e-8, iy: 558e-8, j: 20.1e-8, wz: 557e-6, wy: 80.5e-6 },
+  'IPE330': { area: 62.6e-4, iz: 11770e-8, iy: 788e-8, j: 28.1e-8, wz: 713e-6, wy: 98.5e-6 },
+  'IPE360': { area: 72.7e-4, iz: 16270e-8, iy: 1043e-8, j: 37.3e-8, wz: 904e-6, wy: 123e-6 },
+  'IPE400': { area: 84.5e-4, iz: 23130e-8, iy: 1318e-8, j: 51.2e-8, wz: 1160e-6, wy: 146e-6 },
+  'HEB100': { area: 26.0e-4, iz: 450e-8, iy: 167e-8, j: 9.25e-8, wz: 89.9e-6, wy: 33.5e-6 },
+  'HEB120': { area: 34.0e-4, iz: 864e-8, iy: 318e-8, j: 14.5e-8, wz: 144e-6, wy: 52.9e-6 },
+  'HEB140': { area: 43.0e-4, iz: 1509e-8, iy: 550e-8, j: 24.4e-8, wz: 216e-6, wy: 78.5e-6 },
+  'HEB160': { area: 52.7e-4, iz: 2492e-8, iy: 889e-8, j: 36.5e-8, wz: 311e-6, wy: 111e-6 },
+  'HEB180': { area: 65.3e-4, iz: 3831e-8, iy: 1363e-8, j: 54.8e-8, wz: 426e-6, wy: 151e-6 },
+  'HEB200': { area: 78.1e-4, iz: 5696e-8, iy: 2003e-8, j: 59.3e-8, wz: 570e-6, wy: 200e-6 },
+  'HEB220': { area: 91.0e-4, iz: 7357e-8, iy: 2585e-8, j: 77.0e-8, wz: 673e-6, wy: 258e-6 },
+  'HEB240': { area: 106.0e-4, iz: 11260e-8, iy: 3923e-8, j: 103e-8, wz: 938e-6, wy: 327e-6 },
+  'HEB260': { area: 118.4e-4, iz: 14920e-8, iy: 5135e-8, j: 130e-8, wz: 1150e-6, wy: 395e-6 },
+  'HEB280': { area: 131.4e-4, iz: 19270e-8, iy: 6560e-8, j: 167e-8, wz: 1380e-6, wy: 468e-6 },
+  'HEB300': { area: 149.0e-4, iz: 25170e-8, iy: 8563e-8, j: 233e-8, wz: 1680e-6, wy: 571e-6 },
+};
+
 // =============================================================================
 // App Component
 // =============================================================================
@@ -176,6 +203,10 @@ export default function App() {
   const [slope3D, setSlope3D] = useState(15.0); // alpha (deg)
   const [length3D, setLength3D] = useState(6.0); // L (m)
   const [bays3D, setBays3D] = useState(2); // n_bays
+  const [columnSection, setColumnSection] = useState('HEB200');
+  const [rafterSection, setRafterSection] = useState('IPE220');
+  const [bracingSection, setBracingSection] = useState('IPE100');
+  const [deformationScale, setDeformationScale] = useState(100);
   const [results3D, setResults3D] = useState<any | null>(null);
   const [inputModel3D, setInputModel3D] = useState<any | null>(null);
 
@@ -461,40 +492,63 @@ export default function App() {
       nodes.push({ id: `N_ridge_${b}`, x: 0, y: H_ridge, z, support_type: 'Free' });
     }
 
-    // Standard IPE200 properties for portal frame members:
-    // E = 210 GPa, G = 80 GPa, A = 28.5 cm2 = 2.85e-3 m2
-    // Iy = 1943 cm4 = 1.943e-5 m4 (major axis iz in 3D), Iz = 142 cm4 = 1.42e-6 m4 (minor axis iy in 3D)
-    // J = 7 cm4 = 7e-8 m4
     const E = 210e9;
     const G = 80e9;
-    const area = 2.85e-3;
-    const iz = 1.943e-5;
-    const iy = 1.42e-6;
-    const j = 7e-8;
+
+    const colProps = STEEL_PROFILES_3D[columnSection] || STEEL_PROFILES_3D['HEB200'];
+    const rafProps = STEEL_PROFILES_3D[rafterSection] || STEEL_PROFILES_3D['IPE220'];
+    const braceProps = STEEL_PROFILES_3D[bracingSection] || STEEL_PROFILES_3D['IPE100'];
 
     for (let b = 0; b <= bays; b++) {
       // Columns
-      elements.push({ id: `Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b}`, e: E, g: G, area, iy, iz, j });
-      elements.push({ id: `Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b}`, e: E, g: G, area, iy, iz, j });
+      elements.push({ 
+        id: `Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b}`, 
+        e: E, g: G, ...colProps, group: "columns", group_id: "columns" 
+      });
+      elements.push({ 
+        id: `Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b}`, 
+        e: E, g: G, ...colProps, group: "columns", group_id: "columns" 
+      });
       
       // Rafters
-      elements.push({ id: `Raf_L_${b}`, start_node_id: `N_eaves_L_${b}`, end_node_id: `N_ridge_${b}`, e: E, g: G, area, iy, iz, j });
-      elements.push({ id: `Raf_R_${b}`, start_node_id: `N_ridge_${b}`, end_node_id: `N_eaves_R_${b}`, e: E, g: G, area, iy, iz, j });
+      elements.push({ 
+        id: `Raf_L_${b}`, start_node_id: `N_eaves_L_${b}`, end_node_id: `N_ridge_${b}`, 
+        e: E, g: G, ...rafProps, group: "rafters", group_id: "rafters" 
+      });
+      elements.push({ 
+        id: `Raf_R_${b}`, start_node_id: `N_ridge_${b}`, end_node_id: `N_eaves_R_${b}`, 
+        e: E, g: G, ...rafProps, group: "rafters", group_id: "rafters" 
+      });
     }
 
     // Longitudinal elements (purlins and girts connecting bays)
     for (let b = 0; b < bays; b++) {
       // Eaves girts
-      elements.push({ id: `Girt_L_${b}`, start_node_id: `N_eaves_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, e: E, g: G, area: area * 0.5, iy: iy * 0.5, iz: iz * 0.5, j: j * 0.5 });
-      elements.push({ id: `Girt_R_${b}`, start_node_id: `N_eaves_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, e: E, g: G, area: area * 0.5, iy: iy * 0.5, iz: iz * 0.5, j: j * 0.5 });
+      elements.push({ 
+        id: `Girt_L_${b}`, start_node_id: `N_eaves_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, 
+        e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+      });
+      elements.push({ 
+        id: `Girt_R_${b}`, start_node_id: `N_eaves_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, 
+        e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+      });
       
       // Ridge purlins
-      elements.push({ id: `Purlin_R_${b}`, start_node_id: `N_ridge_${b}`, end_node_id: `N_ridge_${b+1}`, e: E, g: G, area: area * 0.5, iy: iy * 0.5, iz: iz * 0.5, j: j * 0.5 });
+      elements.push({ 
+        id: `Purlin_R_${b}`, start_node_id: `N_ridge_${b}`, end_node_id: `N_ridge_${b+1}`, 
+        e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+      });
 
       // X-bracing in the first and last bays (diagonal members)
       if (b === 0 || b === bays - 1) {
-        elements.push({ id: `Brace_Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, e: E, g: G, area: area * 0.2, iy: iy * 0.1, iz: iz * 0.1, j: j * 0.1 });
-        elements.push({ id: `Brace_Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, e: E, g: G, area: area * 0.2, iy: iy * 0.1, iz: iz * 0.1, j: j * 0.1 });
+        elements.push({ 
+          id: `Brace_Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, 
+          e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+        });
+        elements.push({ 
+          id: `Brace_Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, 
+          e: E, g: G, ...braceProps, group: "bracings", group_id: "bracings" 
+        });
       }
     }
 
@@ -539,7 +593,7 @@ export default function App() {
       loads,
       distributed_loads
     };
-  }, []);
+  }, [columnSection, rafterSection, bracingSection]);
 
   const solve3D = useCallback(() => {
     const bayLength = length3D / bays3D;
@@ -886,7 +940,7 @@ export default function App() {
         {/* ----- Canvas Area ----- */}
         <div className="canvas-area canvas-grid">
           {appMode === '3d' ? (
-            <Canvas3D model={inputModel3D} result={results3D} />
+            <Canvas3D model={inputModel3D} result={results3D} deformationScale={deformationScale} />
           ) : !results ? (
             <div className="welcome-overlay">
               <div className="welcome-overlay__icon">🏗</div>
@@ -1071,6 +1125,103 @@ export default function App() {
                     step="1"
                     value={bays3D}
                     onChange={(e) => setBays3D(parseInt(e.target.value))}
+                    style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                  />
+                </div>
+
+                <h3 className="panel-heading" style={{ marginTop: '12px' }}>Przekroje Grup Prętów</h3>
+
+                {/* Słupy (Columns) */}
+                <div className="param-group">
+                  <label className="param-label" htmlFor="param-column-section" style={{ display: 'block', marginBottom: '6px' }}>
+                    Słupy pionowe (Columns)
+                  </label>
+                  <select
+                    id="param-column-section"
+                    value={columnSection}
+                    onChange={(e) => setColumnSection(e.target.value)}
+                    className="param-select"
+                    style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px 8px' }}
+                  >
+                    <option value="HEB100">HEB 100</option>
+                    <option value="HEB120">HEB 120</option>
+                    <option value="HEB140">HEB 140</option>
+                    <option value="HEB160">HEB 160</option>
+                    <option value="HEB180">HEB 180</option>
+                    <option value="HEB200">HEB 200</option>
+                    <option value="HEB220">HEB 220</option>
+                    <option value="HEB240">HEB 240</option>
+                    <option value="HEB260">HEB 260</option>
+                    <option value="HEB280">HEB 280</option>
+                    <option value="HEB300">HEB 300</option>
+                  </select>
+                </div>
+
+                {/* Rygle (Rafters) */}
+                <div className="param-group">
+                  <label className="param-label" htmlFor="param-rafter-section" style={{ display: 'block', marginBottom: '6px' }}>
+                    Rygle dachowe ukośne (Rafters)
+                  </label>
+                  <select
+                    id="param-rafter-section"
+                    value={rafterSection}
+                    onChange={(e) => setRafterSection(e.target.value)}
+                    className="param-select"
+                    style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px 8px' }}
+                  >
+                    <option value="IPE100">IPE 100</option>
+                    <option value="IPE120">IPE 120</option>
+                    <option value="IPE140">IPE 140</option>
+                    <option value="IPE160">IPE 160</option>
+                    <option value="IPE180">IPE 180</option>
+                    <option value="IPE200">IPE 200</option>
+                    <option value="IPE220">IPE 220</option>
+                    <option value="IPE240">IPE 240</option>
+                    <option value="IPE270">IPE 270</option>
+                    <option value="IPE300">IPE 300</option>
+                    <option value="IPE330">IPE 330</option>
+                    <option value="IPE360">IPE 360</option>
+                    <option value="IPE400">IPE 400</option>
+                  </select>
+                </div>
+
+                {/* Stężenia (Bracings) */}
+                <div className="param-group">
+                  <label className="param-label" htmlFor="param-bracing-section" style={{ display: 'block', marginBottom: '6px' }}>
+                    Płatwie i stężenia (Bracings)
+                  </label>
+                  <select
+                    id="param-bracing-section"
+                    value={bracingSection}
+                    onChange={(e) => setBracingSection(e.target.value)}
+                    className="param-select"
+                    style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px 8px' }}
+                  >
+                    <option value="IPE100">IPE 100</option>
+                    <option value="IPE120">IPE 120</option>
+                    <option value="IPE140">IPE 140</option>
+                    <option value="IPE160">IPE 160</option>
+                    <option value="IPE180">IPE 180</option>
+                    <option value="IPE200">IPE 200</option>
+                    <option value="IPE220">IPE 220</option>
+                  </select>
+                </div>
+
+                <h3 className="panel-heading" style={{ marginTop: '12px' }}>Wizualizacja</h3>
+
+                {/* Skala deformacji */}
+                <div className="param-group">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <label className="param-label" style={{ margin: 0 }}>Skala deformacji</label>
+                    <span className="mono-value" style={{ color: '#8b5cf6', fontWeight: 'bold' }}>{deformationScale}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="200"
+                    step="5"
+                    value={deformationScale}
+                    onChange={(e) => setDeformationScale(parseInt(e.target.value))}
                     style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
                   />
                 </div>
