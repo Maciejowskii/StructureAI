@@ -531,6 +531,99 @@ export default function Canvas3D({
         ctx.lineTo(dp2.x, dp2.y);
         ctx.stroke();
 
+        // Render gorgeous glowing 3D distributed load arrows
+        const load = model?.loads?.find((ld: any) => ld.elementId === el.id);
+        if (load && Math.abs(load.value) > 0) {
+          ctx.save();
+          ctx.strokeStyle = 'rgba(244, 63, 94, ' + (brightness * 0.9) + ')'; // Premium glowing rose color
+          ctx.fillStyle = 'rgba(244, 63, 94, ' + (brightness * 0.9) + ')';
+          ctx.lineWidth = 1.8;
+
+          // Find the actual nodes to interpolate world positions
+          const nStart = nodes.find(n => n.id === el.startNode);
+          const nEnd = nodes.find(n => n.id === el.endNode);
+
+          if (nStart && nEnd) {
+            let resN1 = result?.displacements?.[nStart.id];
+            let resN2 = result?.displacements?.[nEnd.id];
+            const exag = 100.0 * (deformationScale / 100.0);
+
+            for (let i = 1; i <= 3; i++) {
+              const t = i / 4; // 0.25, 0.50, 0.75
+
+              // Base node coordinates
+              let wx = nStart.x + (nEnd.x - nStart.x) * t;
+              let wy = nStart.y + (nEnd.y - nStart.y) * t;
+              let wz = nStart.z + (nEnd.z - nStart.z) * t;
+
+              // Apply deformed displacement to make it stick to the deformed rafter
+              if (resN1 && resN2) {
+                const ux = resN1[0] + (resN2[0] - resN1[0]) * t;
+                const uy = resN1[1] + (resN2[1] - resN1[1]) * t;
+                const uz = resN1[2] + (resN2[2] - resN1[2]) * t;
+                wx += (ux / 1000.0) * exag;
+                wy += (uy / 1000.0) * exag;
+                wz += (uz / 1000.0) * exag;
+              }
+
+              // Tip of the arrow is on the rafter
+              const pTip = project((wx - midX) * scaleFactor, (wy - midY) * scaleFactor, (wz - midZ) * scaleFactor);
+
+              // Tail of the arrow is 0.5 meters above it vertically (along positive Y axis)
+              const pTail = project((wx - midX) * scaleFactor, (wy + 0.5 - midY) * scaleFactor, (wz - midZ) * scaleFactor);
+
+              // Draw arrow shaft
+              ctx.beginPath();
+              ctx.moveTo(pTail.x, pTail.y);
+              ctx.lineTo(pTip.x, pTip.y);
+              ctx.stroke();
+
+              // Draw arrow head pointing from tail to tip
+              const dx = pTip.x - pTail.x;
+              const dy = pTip.y - pTail.y;
+              const len = Math.sqrt(dx * dx + dy * dy);
+              if (len > 0.1) {
+                const ux = dx / len;
+                const uy = dy / len;
+                const nx = -uy;
+                const ny = ux;
+
+                ctx.beginPath();
+                ctx.moveTo(pTip.x, pTip.y);
+                ctx.lineTo(pTip.x - ux * 6 + nx * 4, pTip.y - uy * 6 + ny * 4);
+                ctx.lineTo(pTip.x - ux * 6 - nx * 4, pTip.y - uy * 6 - ny * 4);
+                ctx.closePath();
+                ctx.fill();
+              }
+            }
+
+            // Draw load text annotation above the middle arrow tail (t=0.5)
+            const midT = 0.5;
+            let wxMid = nStart.x + (nEnd.x - nStart.x) * midT;
+            let wyMid = nStart.y + (nEnd.y - nStart.y) * midT;
+            let wzMid = nStart.z + (nEnd.z - nStart.z) * midT;
+
+            if (resN1 && resN2) {
+              const ux = resN1[0] + (resN2[0] - resN1[0]) * midT;
+              const uy = resN1[1] + (resN2[1] - resN1[1]) * midT;
+              const uz = resN1[2] + (resN2[2] - resN1[2]) * midT;
+              wxMid += (ux / 1000.0) * exag;
+              wyMid += (uy / 1000.0) * exag;
+              wzMid += (uz / 1000.0) * exag;
+            }
+
+            // Project the text point slightly above the tail (offset Y = 0.6)
+            const pText = project((wxMid - midX) * scaleFactor, (wyMid + 0.6 - midY) * scaleFactor, (wzMid - midZ) * scaleFactor);
+
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = 'rgba(244, 63, 94, 0.5)';
+            ctx.font = 'bold 9px Outfit, Inter, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`q = ${Math.abs(load.value / 1000).toFixed(1)} kN/m`, pText.x, pText.y);
+          }
+          ctx.restore();
+        }
+
         ctx.shadowBlur = 0; // Reset glow
       });
 
