@@ -209,6 +209,7 @@ export default function App() {
   const [deformationScale, setDeformationScale] = useState(100);
   const [results3D, setResults3D] = useState<any | null>(null);
   const [inputModel3D, setInputModel3D] = useState<any | null>(null);
+  const [selectedEntity, setSelectedEntity] = useState<{type: 'node' | 'element', id: string} | null>(null);
 
   // Initialize WASM
   useEffect(() => {
@@ -595,22 +596,22 @@ export default function App() {
     };
   }, [columnSection, rafterSection, bracingSection]);
 
-  const solve3D = useCallback(() => {
-    const bayLength = length3D / bays3D;
-    const inputModel3D = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D);
-    setInputModel3D(inputModel3D);
+  const solve3D = useCallback((customModel?: any) => {
+    const modelToSolve = customModel || inputModel3D;
+    if (!modelToSolve) return;
+
     if (solveMesh3dFn) {
       const startTime = performance.now();
-      const output = solveMesh3dFn(inputModel3D);
+      const output = solveMesh3dFn(modelToSolve);
       const endTime = performance.now();
       if (output && output.success) {
-        setResults3D({ ...output, model: inputModel3D });
+        setResults3D({ ...output, model: modelToSolve });
         setSolveTimeMs(endTime - startTime);
       } else {
         console.error('[StructurAI] 3D Solver error:', output?.error);
       }
     } else {
-      const mockResultNodes = inputModel3D.nodes.map(n => {
+      const mockResultNodes = modelToSolve.nodes.map((n: any) => {
         const isRidge = n.id.includes('ridge');
         const isEaves = n.id.includes('eaves');
         return {
@@ -623,7 +624,7 @@ export default function App() {
           rz: 0.0,
         };
       });
-      const mockResultElements = inputModel3D.elements.map(el => {
+      const mockResultElements = modelToSolve.elements.map((el: any) => {
         return {
           id: el.id,
           fx_start: 0, fy_start: 0, fz_start: 0, mx_start: 0, my_start: 0, mz_start: el.id.includes('Col') ? -15.4 : -32.5,
@@ -635,16 +636,118 @@ export default function App() {
         error: null,
         nodes: mockResultNodes,
         elements: mockResultElements,
-        model: inputModel3D,
+        model: modelToSolve,
       });
     }
-  }, [width3D, height3D, slope3D, length3D, bays3D, generateParametricModel3D]);
+  }, [inputModel3D, solveMesh3dFn]);
 
+  // Regenerate parametric 3D model when sliders change
   useEffect(() => {
     if (appMode === '3d') {
-      solve3D();
+      const bayLength = length3D / bays3D;
+      const model = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D);
+      setInputModel3D(model);
+      setSelectedEntity(null); // Clear selection
     }
-  }, [appMode, solve3D]);
+  }, [appMode, width3D, height3D, slope3D, length3D, bays3D, columnSection, rafterSection, bracingSection, generateParametricModel3D]);
+
+  // Reactive MES 3D solver runs automatically when model updates
+  useEffect(() => {
+    if (appMode === '3d' && inputModel3D) {
+      solve3D(inputModel3D);
+    }
+  }, [appMode, inputModel3D]);
+
+  // Node editing handlers
+  const updateNodeCoordinate = (nodeId: string, axis: 'x' | 'y' | 'z', val: number) => {
+    if (!inputModel3D) return;
+    const updatedNodes = inputModel3D.nodes.map((n: any) => {
+      if (n.id === nodeId) {
+        return { ...n, [axis]: val };
+      }
+      return n;
+    });
+    setInputModel3D({ ...inputModel3D, nodes: updatedNodes });
+  };
+
+  const updateNodeSupport = (nodeId: string, supportType: 'Fixed' | 'Pinned' | 'Free') => {
+    if (!inputModel3D) return;
+    const updatedNodes = inputModel3D.nodes.map((n: any) => {
+      if (n.id === nodeId) {
+        return { ...n, support_type: supportType };
+      }
+      return n;
+    });
+    setInputModel3D({ ...inputModel3D, nodes: updatedNodes });
+  };
+
+  // Element profile editing handler
+  const updateElementProfile = (elementId: string, profileKey: string) => {
+    if (!inputModel3D) return;
+    const profileProps = STEEL_PROFILES_3D[profileKey];
+    if (!profileProps) return;
+    const updatedElements = inputModel3D.elements.map((el: any) => {
+      if (el.id === elementId) {
+        return { ...el, ...profileProps, sectionName: profileKey };
+      }
+      return el;
+    });
+    setInputModel3D({ ...inputModel3D, elements: updatedElements });
+  };
+
+  // Delete element or node and its connections
+  const deleteSelectedEntity = () => {
+    if (!selectedEntity || !inputModel3D) return;
+    const { type, id } = selectedEntity;
+    
+    if (type === 'node') {
+      const updatedNodes = inputModel3D.nodes.filter((n: any) => n.id !== id);
+      const updatedElements = inputModel3D.elements.filter(
+        (el: any) => el.start_node_id !== id && el.end_node_id !== id
+      );
+      setInputModel3D({
+        ...inputModel3D,
+        nodes: updatedNodes,
+        elements: updatedElements
+      });
+    } else if (type === 'element') {
+      const updatedElements = inputModel3D.elements.filter((el: any) => el.id !== id);
+      setInputModel3D({
+        ...inputModel3D,
+        elements: updatedElements
+      });
+    }
+    
+    setSelectedEntity(null);
+  };
+
+  // Drag and draw element insertion callback
+  const handleAddElement3D = (startNodeId: string, endNodeId: string) => {
+    if (!inputModel3D) return;
+    const exists = inputModel3D.elements.some(
+      (el: any) => 
+        (el.start_node_id === startNodeId && el.end_node_id === endNodeId) ||
+        (el.start_node_id === endNodeId && el.end_node_id === startNodeId)
+    );
+    if (exists) return;
+
+    const newId = `Beam_${Date.now()}`;
+    const defaultProps = STEEL_PROFILES_3D[rafterSection] || STEEL_PROFILES_3D['IPE220'];
+    const newElement = {
+      id: newId,
+      start_node_id: startNodeId,
+      end_node_id: endNodeId,
+      e: 210e9,
+      g: 80e9,
+      ...defaultProps,
+      sectionName: rafterSection
+    };
+
+    setInputModel3D({
+      ...inputModel3D,
+      elements: [...inputModel3D.elements, newElement]
+    });
+  };
 
   const handleDownloadReport = () => {
     if (!results) return;
@@ -857,13 +960,12 @@ export default function App() {
       {/* ===== Main Content ===== */}
       <div className="main-content">
         {/* ----- Left Toolbar ----- */}
-        <nav className="toolbar" style={{ opacity: appMode === '3d' ? 0.5 : 1, transition: 'opacity 0.2s' }}>
+        <nav className="toolbar" style={{ transition: 'opacity 0.2s' }}>
           <button 
             className={`toolbar__btn ${activeTool === 'select' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip={appMode === '3d' ? "Wskaźnik (tylko 2D)" : "Wskaźnik (Wybierz)"} 
+            data-tooltip="Wskaźnik (Wybierz)" 
             onClick={() => setActiveTool('select')}
             id="tool-select"
-            disabled={appMode === '3d'}
           >
             ◇
           </button>
@@ -877,10 +979,9 @@ export default function App() {
           </button>
           <button 
             className={`toolbar__btn ${activeTool === 'draw_beam' ? 'toolbar__btn--active' : ''}`} 
-            data-tooltip={appMode === '3d' ? "Rysuj belkę (tylko 2D)" : "Rysuj belkę (Odręczny szkic)"} 
+            data-tooltip="Rysuj belkę" 
             onClick={() => setActiveTool('draw_beam')}
             id="tool-beam"
-            disabled={appMode === '3d'}
           >
             ✏
           </button>
@@ -940,7 +1041,15 @@ export default function App() {
         {/* ----- Canvas Area ----- */}
         <div className="canvas-area canvas-grid">
           {appMode === '3d' ? (
-            <Canvas3D model={inputModel3D} result={results3D} deformationScale={deformationScale} />
+            <Canvas3D 
+              model={inputModel3D} 
+              result={results3D} 
+              deformationScale={deformationScale} 
+              activeTool={activeTool}
+              selectedEntity={selectedEntity}
+              onSelectEntity={(type, id) => setSelectedEntity(type && id ? { type, id } : null)}
+              onAddElement3D={handleAddElement3D}
+            />
           ) : !results ? (
             <div className="welcome-overlay">
               <div className="welcome-overlay__icon">🏗</div>
@@ -1014,6 +1123,162 @@ export default function App() {
 
           {appMode === '3d' ? (
             <div style={{ padding: '16px', color: '#94a3b8' }}>
+              {/* Dynamic properties section of selected entity */}
+              {selectedEntity && (() => {
+                const { type, id } = selectedEntity;
+                if (type === 'node') {
+                  const node = inputModel3D?.nodes.find((n: any) => n.id === id);
+                  if (!node) return null;
+                  return (
+                    <div style={{
+                      background: 'rgba(59, 130, 246, 0.08)',
+                      border: '1px solid rgba(59, 130, 246, 0.25)',
+                      borderRadius: '8px',
+                      padding: '16px',
+                      marginBottom: '16px'
+                    }}>
+                      <h3 style={{ margin: '0 0 12px 0', fontSize: '13px', color: '#60a5fa', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span>📍 Węzeł: {id}</span>
+                        <button 
+                          onClick={deleteSelectedEntity}
+                          style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid #ef4444', color: '#ef4444', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}
+                        >
+                          USUŃ
+                        </button>
+                      </h3>
+                      
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '4px' }}>Współrzędna X [m]</label>
+                          <input 
+                            type="number" 
+                            step="0.5" 
+                            value={node.x} 
+                            onChange={(e) => updateNodeCoordinate(id, 'x', parseFloat(e.target.value) || 0)}
+                            style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px' }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '4px' }}>Współrzędna Y [m]</label>
+                          <input 
+                            type="number" 
+                            step="0.5" 
+                            value={node.y} 
+                            onChange={(e) => updateNodeCoordinate(id, 'y', parseFloat(e.target.value) || 0)}
+                            style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px' }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '4px' }}>Współrzędna Z [m]</label>
+                          <input 
+                            type="number" 
+                            step="0.5" 
+                            value={node.z} 
+                            onChange={(e) => updateNodeCoordinate(id, 'z', parseFloat(e.target.value) || 0)}
+                            style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px' }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '6px' }}>Typ podpory</label>
+                          <div style={{ display: 'flex', gap: '4px' }}>
+                            {['Fixed', 'Pinned', 'Free'].map((t) => (
+                              <button
+                                key={t}
+                                onClick={() => updateNodeSupport(id, t as any)}
+                                style={{
+                                  flex: 1,
+                                  padding: '4px 0',
+                                  fontSize: '10.5px',
+                                  borderRadius: '4px',
+                                  border: '1px solid rgba(255,255,255,0.1)',
+                                  background: node.support_type === t ? '#3b82f6' : 'rgba(0,0,0,0.3)',
+                                  color: '#fff',
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                {t === 'Fixed' ? 'Utwierdzenie' : t === 'Pinned' ? 'Przegub' : 'Brak'}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                } else if (type === 'element') {
+                  const element = inputModel3D?.elements.find((e: any) => e.id === id);
+                  if (!element) return null;
+                  
+                  const currentSection = element.sectionName || 
+                    Object.keys(STEEL_PROFILES_3D).find(k => STEEL_PROFILES_3D[k].area === element.area) || 
+                    'IPE220';
+                    
+                  return (
+                    <div style={{
+                      background: 'rgba(139, 92, 246, 0.08)',
+                      border: '1px solid rgba(139, 92, 246, 0.25)',
+                      borderRadius: '8px',
+                      padding: '16px',
+                      marginBottom: '16px'
+                    }}>
+                      <h3 style={{ margin: '0 0 12px 0', fontSize: '13px', color: '#a78bfa', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span>🔩 Pręt: {id}</span>
+                        <button 
+                          onClick={deleteSelectedEntity}
+                          style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid #ef4444', color: '#ef4444', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}
+                        >
+                          USUŃ
+                        </button>
+                      </h3>
+                      
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <div style={{ fontSize: '11px', color: '#94a3b8' }}>
+                          Połączenie: <strong style={{ color: '#fff' }}>{element.start_node_id}</strong> &rarr; <strong style={{ color: '#fff' }}>{element.end_node_id}</strong>
+                        </div>
+                        
+                        <div>
+                          <label style={{ display: 'block', fontSize: '11px', color: '#94a3b8', marginBottom: '6px' }}>Profil stalowy pręta</label>
+                          <select
+                            value={currentSection}
+                            onChange={(e) => updateElementProfile(id, e.target.value)}
+                            style={{ width: '100%', background: 'rgba(0,0,0,0.3)', color: '#fff', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', padding: '6px 8px' }}
+                          >
+                            <optgroup label="IPE Profiles">
+                              <option value="IPE100">IPE 100</option>
+                              <option value="IPE120">IPE 120</option>
+                              <option value="IPE140">IPE 140</option>
+                              <option value="IPE160">IPE 160</option>
+                              <option value="IPE180">IPE 180</option>
+                              <option value="IPE200">IPE 200</option>
+                              <option value="IPE220">IPE 220</option>
+                              <option value="IPE240">IPE 240</option>
+                              <option value="IPE270">IPE 270</option>
+                              <option value="IPE300">IPE 300</option>
+                              <option value="IPE330">IPE 330</option>
+                              <option value="IPE360">IPE 360</option>
+                              <option value="IPE400">IPE 400</option>
+                            </optgroup>
+                            <optgroup label="HEB Profiles">
+                              <option value="HEB100">HEB 100</option>
+                              <option value="HEB120">HEB 120</option>
+                              <option value="HEB140">HEB 140</option>
+                              <option value="HEB160">HEB 160</option>
+                              <option value="HEB180">HEB 180</option>
+                              <option value="HEB200">HEB 200</option>
+                              <option value="HEB220">HEB 220</option>
+                              <option value="HEB240">HEB 240</option>
+                              <option value="HEB260">HEB 260</option>
+                              <option value="HEB280">HEB 280</option>
+                              <option value="HEB300">HEB 300</option>
+                            </optgroup>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
+
               {/* Generator Info Widget */}
               <div style={{
                 background: 'rgba(139, 92, 246, 0.1)',

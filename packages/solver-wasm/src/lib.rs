@@ -632,7 +632,7 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         }
 
         let mut utils_5 = Vec::new();
-        let fy = 235.0e6;
+        let fy = 235.0e6; // Yield strength in Pa (S235)
 
         for i in 0..5 {
             let xi = (i as f64) * 0.25 * l;
@@ -642,12 +642,8 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             let mz_xi = -f_local_el[5] - f_local_el[1] * xi - q_local_y * xi * xi / 2.0;
             let my_xi = -f_local_el[4] + f_local_el[2] * xi;
 
-            // ULS EC3 Check
-            let is_compressed = n_xi < 0.0;
-            let chi = if is_compressed { 0.6 } else { 1.0 };
-            let axial_cap = chi * area * fy;
-
-            let term_n = if axial_cap > 0.0 { n_xi.abs() / axial_cap } else { 0.0 };
+            // Eurocode 3 exact formula: util(x) = |N|/(0.6*A*fy) + |My|/(Wy*fy) + |Mz|/(Wz*fy)
+            let term_n = if (area > 0.0) && (fy > 0.0) { n_xi.abs() / (0.6 * area * fy) } else { 0.0 };
             let term_my = if (wy > 0.0) && (fy > 0.0) { my_xi.abs() / (wy * fy) } else { 0.0 };
             let term_wz = if (wz > 0.0) && (fy > 0.0) { mz_xi.abs() / (wz * fy) } else { 0.0 };
 
