@@ -437,26 +437,25 @@ export default function App() {
     if (wasmReady) solve();
   }, [wasmReady, solve]);
 
-  const generatePortalFrame3D = useCallback((B: number, H: number, alpha: number, L: number, n_bays: number) => {
+  const generateParametricModel3D = useCallback((width: number, height: number, alpha: number, bayLength: number, bays: number) => {
     const nodes: any[] = [];
     const elements: any[] = [];
     const loads: any[] = [];
 
-    const bay_length = L / n_bays;
     const alpha_rad = (alpha * Math.PI) / 180;
-    const H_ridge = H + Math.tan(alpha_rad) * (B / 2);
+    const H_ridge = height + Math.tan(alpha_rad) * (width / 2);
 
     // Generate nodes
-    for (let b = 0; b <= n_bays; b++) {
-      const z = b * bay_length;
+    for (let b = 0; b <= bays; b++) {
+      const z = b * bayLength;
       // Left column base
-      nodes.push({ id: `N_base_L_${b}`, x: -B/2, y: 0, z, support_type: 'Fixed' });
+      nodes.push({ id: `N_base_L_${b}`, x: -width/2, y: 0, z, support_type: 'Fixed' });
       // Right column base
-      nodes.push({ id: `N_base_R_${b}`, x: B/2, y: 0, z, support_type: 'Fixed' });
+      nodes.push({ id: `N_base_R_${b}`, x: width/2, y: 0, z, support_type: 'Fixed' });
       // Left column top (eaves)
-      nodes.push({ id: `N_eaves_L_${b}`, x: -B/2, y: H, z, support_type: 'Free' });
+      nodes.push({ id: `N_eaves_L_${b}`, x: -width/2, y: height, z, support_type: 'Free' });
       // Right column top (eaves)
-      nodes.push({ id: `N_eaves_R_${b}`, x: B/2, y: H, z, support_type: 'Free' });
+      nodes.push({ id: `N_eaves_R_${b}`, x: width/2, y: height, z, support_type: 'Free' });
       // Ridge node (roof top center)
       nodes.push({ id: `N_ridge_${b}`, x: 0, y: H_ridge, z, support_type: 'Free' });
     }
@@ -472,7 +471,7 @@ export default function App() {
     const iy = 1.42e-6;
     const j = 7e-8;
 
-    for (let b = 0; b <= n_bays; b++) {
+    for (let b = 0; b <= bays; b++) {
       // Columns
       elements.push({ id: `Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b}`, e: E, g: G, area, iy, iz, j });
       elements.push({ id: `Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b}`, e: E, g: G, area, iy, iz, j });
@@ -483,7 +482,7 @@ export default function App() {
     }
 
     // Longitudinal elements (purlins and girts connecting bays)
-    for (let b = 0; b < n_bays; b++) {
+    for (let b = 0; b < bays; b++) {
       // Eaves girts
       elements.push({ id: `Girt_L_${b}`, start_node_id: `N_eaves_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, e: E, g: G, area: area * 0.5, iy: iy * 0.5, iz: iz * 0.5, j: j * 0.5 });
       elements.push({ id: `Girt_R_${b}`, start_node_id: `N_eaves_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, e: E, g: G, area: area * 0.5, iy: iy * 0.5, iz: iz * 0.5, j: j * 0.5 });
@@ -492,14 +491,14 @@ export default function App() {
       elements.push({ id: `Purlin_R_${b}`, start_node_id: `N_ridge_${b}`, end_node_id: `N_ridge_${b+1}`, e: E, g: G, area: area * 0.5, iy: iy * 0.5, iz: iz * 0.5, j: j * 0.5 });
 
       // X-bracing in the first and last bays (diagonal members)
-      if (b === 0 || b === n_bays - 1) {
+      if (b === 0 || b === bays - 1) {
         elements.push({ id: `Brace_Col_L_${b}`, start_node_id: `N_base_L_${b}`, end_node_id: `N_eaves_L_${b+1}`, e: E, g: G, area: area * 0.2, iy: iy * 0.1, iz: iz * 0.1, j: j * 0.1 });
         elements.push({ id: `Brace_Col_R_${b}`, start_node_id: `N_base_R_${b}`, end_node_id: `N_eaves_R_${b+1}`, e: E, g: G, area: area * 0.2, iy: iy * 0.1, iz: iz * 0.1, j: j * 0.1 });
       }
     }
 
     // Apply some sample loads
-    for (let b = 0; b <= n_bays; b++) {
+    for (let b = 0; b <= bays; b++) {
       loads.push({
         node_id: `N_ridge_${b}`,
         fx: 0.0,
@@ -524,7 +523,8 @@ export default function App() {
   }, []);
 
   const solve3D = useCallback(() => {
-    const inputModel3D = generatePortalFrame3D(width3D, height3D, slope3D, length3D, bays3D);
+    const bayLength = length3D / bays3D;
+    const inputModel3D = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D);
     if (solveMesh3dFn) {
       const startTime = performance.now();
       const output = solveMesh3dFn(inputModel3D);
@@ -564,7 +564,7 @@ export default function App() {
         model: inputModel3D,
       });
     }
-  }, [width3D, height3D, slope3D, length3D, bays3D, generatePortalFrame3D]);
+  }, [width3D, height3D, slope3D, length3D, bays3D, generateParametricModel3D]);
 
   useEffect(() => {
     if (appMode === '3d') {

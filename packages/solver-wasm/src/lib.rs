@@ -1208,4 +1208,48 @@ mod tests {
         // Minimum reinforcement: ~1.82 cm2
         assert!((result.as_min - 1.82).abs() < 0.1, "Minimum area was: {}", result.as_min);
     }
+
+    #[test]
+    fn test_fem_3d_portal_frame() {
+        let nodes = vec![
+            Node3D { id: "N1".to_string(), x: 0.0, y: 0.0, z: 0.0, support_type: "Fixed".to_string() },
+            Node3D { id: "N2".to_string(), x: 0.0, y: 4.0, z: 0.0, support_type: "Free".to_string() },
+        ];
+        let elements = vec![
+            Element3D {
+                id: "E1".to_string(),
+                start_node_id: "N1".to_string(),
+                end_node_id: "N2".to_string(),
+                e: 210e9,
+                g: 80e9,
+                area: 2.85e-3,
+                iy: 1.42e-6,
+                iz: 1.943e-5,
+                j: 7e-8,
+            }
+        ];
+        let loads = vec![
+            Load3D {
+                node_id: "N2".to_string(),
+                fx: 10000.0, // 10 kN lateral load
+                fy: 0.0,
+                fz: 0.0,
+                mx: 0.0,
+                my: 0.0,
+                mz: 0.0,
+            }
+        ];
+
+        let model = InputModel3D { nodes, elements, loads };
+        let output = solve_mesh_3d_internal(&model);
+
+        assert!(output.success);
+        assert_eq!(output.nodes.len(), 2);
+        
+        let n2_res = &output.nodes[1];
+        assert_eq!(n2_res.id, "N2");
+        // Lateral displacement of vertical cantilever under end load: P * L^3 / (3 * E * I)
+        // 10000 * 64 / (3 * 210e9 * 1.943e-5) = 640000 / 12240900 = 0.05228 m = 52.28 mm
+        assert!((n2_res.ux - 52.28).abs() < 0.5, "ux was: {}", n2_res.ux);
+    }
 }
