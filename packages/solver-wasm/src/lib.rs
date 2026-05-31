@@ -426,6 +426,13 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         }
     }
 
+    // Stabilize unconnected degrees of freedom to prevent singular matrix
+    for d in 0..system_size {
+        if k_global[(d, d)].abs() < 1e-9 {
+            k_global[(d, d)] = 1.0;
+        }
+    }
+
     // Solve system K * U = F
     let u_solved = match k_global.lu().solve(&f_global) {
         Some(u) => u,
@@ -520,8 +527,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         let iy = el.iy;
         let iz = el.iz;
         let j = 1e-8;
-        let wy = el.wy;
-        let wz = el.wz;
         let l2 = l * l;
         let l3 = l2 * l;
 
@@ -546,38 +551,37 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
 
         // distributed load calculation
         let mut q_local_y = 0.0;
-        let mut q_local_x = 0.0;
         let mut q_local_z = 0.0;
         if let Some(load) = input_model.loads.iter().find(|l| l.element_id == el.id) {
             let q = load.value;
-            q_local_x = -q * 1000.0 * r[(0, 1)];
             q_local_y = -q * 1000.0 * r[(1, 1)];
             q_local_z = -q * 1000.0 * r[(2, 1)];
         }
 
-        let mut utils_5 = Vec::new();
-        let fy = 235.0e6; // S235 yield strength in N/m^2 (Pa)
+        let mut el_utils = vec![0.0; 5];
+        let fy = 235.0e6; // S235 [Pa]
+        let length = l;
 
         for step in 0..5 {
             let xi = (step as f64) * 0.25;
-            let x_loc = xi * l;
+            let x_loc = xi * length;
 
-            // Funkcje sił wewnętrznych uwzględniające obciążenia przęsłowe
-            let n_x = -f_local[0] - q_local_x * x_loc;
-            let my_x = -f_local[4] * (1.0 - xi) + f_local[10] * xi - 0.5 * q_local_z * x_loc * (l - x_loc);
-            let mz_x = -f_local[5] * (1.0 - xi) + f_local[11] * xi - 0.5 * q_local_y * x_loc * (l - x_loc);
+            // Siła osiowa i momenty zginające w punkcie x_loc
+            let n_x = -f_local[0];
+            let my_x = -f_local[4] * (1.0 - xi) + f_local[10] * xi - 0.5 * q_local_z * x_loc * (length - x_loc);
+            let mz_x = -f_local[5] * (1.0 - xi) + f_local[11] * xi - 0.5 * q_local_y * x_loc * (length - x_loc);
 
-            // Eurokod 3 SGN: Wyboczenie pręta ściskanego (N < 0)
-            let chi = if n_x < 0.0 { 0.6 } else { 1.0 }; // Współczynnik redukcyjny dla uproszczonego wyboczenia
+            // Współczynnik wyboczenia dla elementów ściskanych (N < 0)
+            let chi = if n_x < 0.0 { 0.6 } else { 1.0 };
 
-            let term_n = if (area > 0.0) && (fy > 0.0) { n_x.abs() / (chi * area * fy) } else { 0.0 };
-            let term_my = if (wy > 0.0) && (fy > 0.0) { my_x.abs() / (wy * fy) } else { 0.0 };
-            let term_wz = if (wz > 0.0) && (fy > 0.0) { mz_x.abs() / (wz * fy) } else { 0.0 };
+            let term_n = n_x.abs() / (chi * el.area * fy);
+            let term_my = my_x.abs() / (el.wy * fy);
+            let term_mz = mz_x.abs() / (el.wz * fy);
 
-            let util = term_n + term_my + term_wz;
-            utils_5.push(util);
+            let total_util = term_n + term_my + term_mz;
+            el_utils[step] = if total_util.is_nan() { 0.0 } else { total_util.min(2.0) };
         }
-        utilization_map.insert(el.id.clone(), utils_5);
+        utilization_map.insert(el.id.clone(), el_utils);
     }
 
     SolverOutput3D {

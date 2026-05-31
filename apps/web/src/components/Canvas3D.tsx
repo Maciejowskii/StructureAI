@@ -8,6 +8,7 @@ interface Canvas3DProps {
   selectedEntity?: { type: 'node' | 'element', id: string } | null;
   onSelectEntity?: (entity: { type: 'node' | 'element', id: string } | null) => void;
   onAddElement3D?: (startNodeId: string, endNodeId: string) => void;
+  onAddElement?: (startNodeId: string, endNodeId: string) => void;
 }
 
 export default function Canvas3D({
@@ -17,7 +18,8 @@ export default function Canvas3D({
   activeTool = 'select',
   selectedEntity = null,
   onSelectEntity,
-  onAddElement3D
+  onAddElement3D,
+  onAddElement
 }: Canvas3DProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [angleX, setAngleX] = useState(-0.6); // Rotation around Y
@@ -41,6 +43,9 @@ export default function Canvas3D({
 
   const onAddElement3DRef = useRef(onAddElement3D);
   onAddElement3DRef.current = onAddElement3D;
+
+  const onAddElementRef = useRef(onAddElement);
+  onAddElementRef.current = onAddElement;
 
   const projectedNodesRef = useRef<{ id: string, x: number, y: number }[]>([]);
   const projectedElementsRef = useRef<{ id: string, x1: number, y1: number, x2: number, y2: number }[]>([]);
@@ -67,7 +72,10 @@ export default function Canvas3D({
     if (val <= 0.5) return '#10b981'; // Emerald green
     if (val <= 0.8) return '#eab308'; // Solar yellow
     if (val <= 1.0) return '#f97316'; // Orange
-    return '#ef4444'; // Red (SGN exceeded)
+    
+    // Pulsujący Czerwony (SGN przekroczony!)
+    const alpha = 0.4 + 0.6 * Math.abs(Math.sin(pulseTime * 0.008));
+    return `rgba(239, 68, 68, ${alpha})`;
   };
 
   // Pulsing tick
@@ -197,9 +205,13 @@ export default function Canvas3D({
         const ym = e.clientY - rect.top;
 
         const hit = performHitTest(xm, ym);
+        console.log(`[Canvas3D] handleMouseUp: drag ended from node ${dragStartNodeId}. Hit target:`, hit);
         if (hit && hit.type === 'node' && hit.id !== dragStartNodeId) {
           if (onAddElement3DRef.current) {
             onAddElement3DRef.current(dragStartNodeId, hit.id);
+          }
+          if (onAddElementRef.current) {
+            onAddElementRef.current(dragStartNodeId, hit.id);
           }
         }
         setDragStartNodeId(null);
@@ -283,6 +295,9 @@ export default function Canvas3D({
             if (onAddElement3DRef.current) {
               onAddElement3DRef.current(dragStartNodeId, hit.id);
             }
+            if (onAddElementRef.current) {
+              onAddElementRef.current(dragStartNodeId, hit.id);
+            }
           }
         }
         setDragStartNodeId(null);
@@ -309,7 +324,7 @@ export default function Canvas3D({
       canvas.removeEventListener('touchmove', handleTouchMove);
       canvas.removeEventListener('touchend', handleTouchEnd);
     };
-  }, [dragStartNodeId, dragCurrentPos]);
+  }, [dragStartNodeId, dragCurrentPos, activeTool, model, onSelectEntity, onAddElement3D, onAddElement]);
 
   // Main rendering loop
   useEffect(() => {
@@ -614,12 +629,14 @@ export default function Canvas3D({
 
             // Project the text point slightly above the tail (offset Y = 0.6)
             const pText = project((wxMid - midX) * scaleFactor, (wyMid + 0.6 - midY) * scaleFactor, (wzMid - midZ) * scaleFactor);
+            const qVal = Math.abs(load.value);
+            const qDisplay = qVal > 100.0 ? qVal / 1000.0 : qVal;
 
             ctx.shadowBlur = 8;
             ctx.shadowColor = 'rgba(244, 63, 94, 0.5)';
             ctx.font = 'bold 9px Outfit, Inter, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText(`q = ${Math.abs(load.value / 1000).toFixed(1)} kN/m`, pText.x, pText.y);
+            ctx.fillText(`q = ${qDisplay.toFixed(1)} kN/m`, pText.x, pText.y);
           }
           ctx.restore();
         }
@@ -692,6 +709,83 @@ export default function Canvas3D({
           ctx.arc(px.x, px.y, radius, 0, Math.PI * 2);
           ctx.stroke();
           ctx.shadowBlur = 0; // Reset
+        }
+
+        // Render glowing Support Reactions
+        if (result && result.reactions && result.reactions[n.id]) {
+          const reactions = result.reactions[n.id];
+          const rx = reactions[0]; // kN
+          const ry = reactions[1]; // kN
+
+          // Draw vertical reaction arrow (Ry)
+          if (Math.abs(ry) > 0.05) {
+            ctx.save();
+            ctx.strokeStyle = '#22c55e'; // Green arrow
+            ctx.fillStyle = '#22c55e';
+            ctx.lineWidth = 2.0;
+            ctx.shadowColor = '#22c55e';
+            ctx.shadowBlur = 6;
+
+            const arrowLen = 22; // pixels
+            const dir = ry > 0 ? 1 : -1; // positive points up
+            const pTip = px;
+            const pTail = { x: px.x, y: px.y + dir * arrowLen };
+
+            // Draw shaft
+            ctx.beginPath();
+            ctx.moveTo(pTail.x, pTail.y);
+            ctx.lineTo(pTip.x, pTip.y);
+            ctx.stroke();
+
+            // Draw head
+            ctx.beginPath();
+            ctx.moveTo(pTip.x, pTip.y);
+            ctx.lineTo(pTip.x - 4, pTip.y + dir * 6);
+            ctx.lineTo(pTip.x + 4, pTip.y + dir * 6);
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw text
+            ctx.font = 'bold 9px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(`Ry = ${ry.toFixed(1)} kN`, pTail.x, pTail.y + (dir > 0 ? 10 : -4));
+            ctx.restore();
+          }
+
+          // Draw horizontal reaction arrow (Rx)
+          if (Math.abs(rx) > 0.05) {
+            ctx.save();
+            ctx.strokeStyle = '#ef4444'; // Red arrow
+            ctx.fillStyle = '#ef4444';
+            ctx.lineWidth = 2.0;
+            ctx.shadowColor = '#ef4444';
+            ctx.shadowBlur = 6;
+
+            const arrowLen = 22;
+            const dir = rx > 0 ? 1 : -1; // positive points right
+            const pTip = px;
+            const pTail = { x: px.x - dir * arrowLen, y: px.y };
+
+            // Draw shaft
+            ctx.beginPath();
+            ctx.moveTo(pTail.x, pTail.y);
+            ctx.lineTo(pTip.x, pTip.y);
+            ctx.stroke();
+
+            // Draw head
+            ctx.beginPath();
+            ctx.moveTo(pTip.x, pTip.y);
+            ctx.lineTo(pTip.x - dir * 6, pTip.y - 4);
+            ctx.lineTo(pTip.x - dir * 6, pTip.y + 4);
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw text
+            ctx.font = 'bold 9px monospace';
+            ctx.textAlign = dir > 0 ? 'right' : 'left';
+            ctx.fillText(`Rx = ${rx.toFixed(1)} kN`, pTail.x - dir * 4, pTail.y - 4);
+            ctx.restore();
+          }
         }
       });
 

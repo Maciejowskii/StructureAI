@@ -212,6 +212,8 @@ export default function App() {
   const [freeModel3D, setFreeModel3D] = useState<any | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<{type: 'node' | 'element', id: string} | null>(null);
   const [workMode3D, setWorkMode3D] = useState<'parametric' | 'free_cad'>('parametric');
+  const [connectNodeA, setConnectNodeA] = useState<string>('');
+  const [connectNodeB, setConnectNodeB] = useState<string>('');
   const activeModel3D = workMode3D === 'free_cad' ? freeModel3D : inputModel3D;
 
   // Initialize WASM
@@ -473,7 +475,7 @@ export default function App() {
     if (wasmReady) solve();
   }, [wasmReady, solve]);
 
-  const generateParametricModel3D = useCallback((width: number, height: number, alpha: number, bayLength: number, bays: number) => {
+  const generateParametricModel3D = useCallback((width: number, height: number, alpha: number, bayLength: number, bays: number, qLoad: number) => {
     const nodes: any[] = [];
     const elements: any[] = [];
 
@@ -553,11 +555,11 @@ export default function App() {
     for (let b = 0; b <= bays; b++) {
       distributed_loads.push({
         elementId: `Raf_L_${b}`,
-        value: -24.0, // kN/m vertical distributed load
+        value: -qLoad, // kN/m vertical distributed load
       });
       distributed_loads.push({
         elementId: `Raf_R_${b}`,
-        value: -24.0,
+        value: -qLoad,
       });
     }
 
@@ -662,20 +664,20 @@ export default function App() {
   useEffect(() => {
     if (appMode === '3d') {
       const bayLength = length3D / bays3D;
-      const model = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D);
+      const model = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D, loadValue);
       setInputModel3D(model);
       setSelectedEntity(null); // Clear selection
     }
-  }, [appMode, width3D, height3D, slope3D, length3D, bays3D, columnSection, rafterSection, bracingSection, generateParametricModel3D]);
+  }, [appMode, width3D, height3D, slope3D, length3D, bays3D, loadValue, columnSection, rafterSection, bracingSection, generateParametricModel3D]);
 
-  // Synchronizacja przy przełączeniu trybu pracy 3D
+  // Synchronizacja przy przełączeniu trybu pracy 3D (tylko inicjalizacja, nie nadpisujemy istniejącego modelu!)
   useEffect(() => {
-    if (workMode3D === 'free_cad') {
+    if (workMode3D === 'free_cad' && !freeModel3D) {
       const bayLength = length3D / bays3D;
-      const currentParametric = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D);
+      const currentParametric = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D, loadValue);
       setFreeModel3D(currentParametric);
     }
-  }, [workMode3D, width3D, height3D, slope3D, length3D, bays3D, generateParametricModel3D]);
+  }, [workMode3D, freeModel3D, width3D, height3D, slope3D, length3D, bays3D, loadValue, generateParametricModel3D]);
 
   // Reactive MES 3D solver runs automatically when model updates
   useEffect(() => {
@@ -683,6 +685,13 @@ export default function App() {
       solve3D(activeModel3D);
     }
   }, [appMode, activeModel3D]);
+
+  // Automatyczne przełączenie na Free CAD po kliknięciu narzędzia ołówka w 3D
+  useEffect(() => {
+    if (appMode === '3d' && activeTool === 'draw_beam' && workMode3D !== 'free_cad') {
+      setWorkMode3D('free_cad');
+    }
+  }, [appMode, activeTool, workMode3D]);
 
   // Safe entity lookup helpers
   const getNode = (id: string) => {
@@ -764,6 +773,9 @@ export default function App() {
 
   // Drag and draw element insertion callback
   const handleAddElement3D = (startNodeId: string, endNodeId: string) => {
+    const nodeA = activeModel3D?.geometry?.nodes.find((n: any) => n.id === startNodeId);
+    const nodeB = activeModel3D?.geometry?.nodes.find((n: any) => n.id === endNodeId);
+    console.log(`[StructurAI] handleAddElement3D: connecting nodes ${startNodeId} (${nodeA ? `x: ${nodeA.x}, y: ${nodeA.y}, z: ${nodeA.z}` : '?'}) and ${endNodeId} (${nodeB ? `x: ${nodeB.x}, y: ${nodeB.y}, z: ${nodeB.z}` : '?'})`);
     setFreeModel3D((prev: any) => {
       if (!prev) return prev;
       const exists = prev.geometry.elements.some(
@@ -792,6 +804,35 @@ export default function App() {
         }
       };
     });
+  };
+
+  const handleAddNode3D = () => {
+    setFreeModel3D((prev: any) => {
+      if (!prev) return prev;
+      const newId = `Node_${prev.geometry.nodes.length + 1}`;
+      const newNode = {
+        id: newId,
+        x: 2.0,
+        y: 2.0,
+        z: 0.0,
+        supportRestraints: [false, false, false, false, false, false]
+      };
+      setSelectedEntity({ type: 'node', id: newId });
+      return {
+        ...prev,
+        geometry: {
+          ...prev.geometry,
+          nodes: [...prev.geometry.nodes, newNode]
+        }
+      };
+    });
+  };
+
+  const handleConnectNodes3D = () => {
+    if (!connectNodeA || !connectNodeB || connectNodeA === connectNodeB) return;
+    handleAddElement3D(connectNodeA, connectNodeB);
+    setConnectNodeA('');
+    setConnectNodeB('');
   };
 
   const handleDownloadReport = () => {
@@ -1087,7 +1128,7 @@ export default function App() {
         <div className="canvas-area canvas-grid">
           {appMode === '3d' ? (
             <Canvas3D 
-              model={inputModel3D} 
+              model={activeModel3D} 
               result={results3D} 
               deformationScale={deformationScale} 
               activeTool={activeTool}
@@ -1782,7 +1823,7 @@ export default function App() {
                   }}
                   id="tab-3d-freecad"
                 >
-                  ✏️ Edytor CAD
+                  ✏️ Edytor Wolny CAD
                 </button>
               </div>
 
@@ -1814,7 +1855,7 @@ export default function App() {
                       {/* Height 3D */}
                       <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                          <label className="param-label" style={{ margin: 0 }}>Wysokość okapu H [m]</label>
+                          <label className="param-label" style={{ margin: 0 }}>Wysokość słupów H [m]</label>
                           <span className="mono-value" style={{ color: '#a78bfa', fontWeight: 'bold' }}>{height3D.toFixed(1)} m</span>
                         </div>
                         <input
@@ -1832,7 +1873,7 @@ export default function App() {
                       {/* Slope 3D */}
                       <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                          <label className="param-label" style={{ margin: 0 }}>Spadek dachu alpha [°]</label>
+                          <label className="param-label" style={{ margin: 0 }}>Kąt nachylenia dachu alpha [°]</label>
                           <span className="mono-value" style={{ color: '#a78bfa', fontWeight: 'bold' }}>{slope3D.toFixed(0)}°</span>
                         </div>
                         <input
@@ -1868,7 +1909,7 @@ export default function App() {
                       {/* Bays 3D */}
                       <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                          <label className="param-label" style={{ margin: 0 }}>Liczba traktów (bays)</label>
+                          <label className="param-label" style={{ margin: 0 }}>Liczba segmentów</label>
                           <span className="mono-value" style={{ color: '#a78bfa', fontWeight: 'bold' }}>{bays3D}</span>
                         </div>
                         <input
@@ -1880,6 +1921,24 @@ export default function App() {
                           onChange={(e) => setBays3D(parseInt(e.target.value))}
                           style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
                           id="param-3d-bays"
+                        />
+                      </div>
+
+                      {/* Obciążenie pionowe q 3D */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <label className="param-label" style={{ margin: 0 }}>Obciążenie pionowe ramy q [kN/m]</label>
+                          <span className="mono-value" style={{ color: '#a78bfa', fontWeight: 'bold' }}>{loadValue.toFixed(1)} kN/m</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="5.0"
+                          max="80.0"
+                          step="1.0"
+                          value={loadValue}
+                          onChange={(e) => setLoadValue(parseFloat(e.target.value))}
+                          style={{ width: '100%', accentColor: '#8b5cf6', height: '4px' }}
+                          id="param-3d-load"
                         />
                       </div>
                     </div>
@@ -1953,6 +2012,124 @@ export default function App() {
                 </>
               ) : (
                 <>
+                  {/* Narzędzia Edycji CAD */}
+                  <div className="properties-panel__section">
+                    <div className="properties-panel__section-title">Narzędzia CAD 3D</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
+                      <button
+                        onClick={() => {
+                          setFreeModel3D(null);
+                          setSelectedEntity(null);
+                        }}
+                        style={{
+                          width: '100%',
+                          background: 'rgba(255, 255, 255, 0.05)',
+                          border: '1px solid rgba(255, 255, 255, 0.1)',
+                          borderRadius: '6px',
+                          color: '#e2e8f0',
+                          fontWeight: 'bold',
+                          padding: '10px',
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '6px',
+                          transition: 'all 0.15s ease',
+                          marginBottom: '4px'
+                        }}
+                        id="btn-reset-to-sliders-3d"
+                      >
+                        🔄 Resetuj do ramy suwaków
+                      </button>
+
+                      <button
+                        onClick={handleAddNode3D}
+                        style={{
+                          width: '100%',
+                          background: 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)',
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: '6px',
+                          fontWeight: 'bold',
+                          padding: '10px',
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '6px',
+                          boxShadow: '0 4px 12px rgba(99, 102, 241, 0.2)',
+                          transition: 'all 0.15s ease'
+                        }}
+                        id="btn-add-node-3d"
+                      >
+                        ➕ Dodaj nowy węzeł (Node)
+                      </button>
+                      
+                      <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '10px', marginTop: '5px' }}>
+                        <span style={{ fontSize: '11px', color: '#94a3b8', display: 'block', marginBottom: '6px', fontWeight: '600' }}>
+                          🔗 Szybkie łączenie prętem:
+                        </span>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginBottom: '8px' }}>
+                          <div>
+                            <label style={{ fontSize: '9px', color: '#64748b', display: 'block', marginBottom: '2px' }}>Węzeł A</label>
+                            <select
+                              id="connect-node-a"
+                              style={{ width: '100%', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px', borderRadius: '6px', fontSize: '11px' }}
+                              value={connectNodeA}
+                              onChange={(e) => setConnectNodeA(e.target.value)}
+                            >
+                              <option value="">-- wybierz --</option>
+                              {freeModel3D?.geometry?.nodes.map((n: any) => (
+                                <option key={n.id} value={n.id}>{n.id}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label style={{ fontSize: '9px', color: '#64748b', display: 'block', marginBottom: '2px' }}>Węzeł B</label>
+                            <select
+                              id="connect-node-b"
+                              style={{ width: '100%', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '6px', borderRadius: '6px', fontSize: '11px' }}
+                              value={connectNodeB}
+                              onChange={(e) => setConnectNodeB(e.target.value)}
+                            >
+                              <option value="">-- wybierz --</option>
+                              {freeModel3D?.geometry?.nodes.map((n: any) => (
+                                <option key={n.id} value={n.id}>{n.id}</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                        <button
+                          onClick={handleConnectNodes3D}
+                          disabled={!connectNodeA || !connectNodeB || connectNodeA === connectNodeB}
+                          style={{
+                            width: '100%',
+                            background: (!connectNodeA || !connectNodeB || connectNodeA === connectNodeB)
+                              ? 'rgba(255,255,255,0.05)'
+                              : 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                            color: (!connectNodeA || !connectNodeB || connectNodeA === connectNodeB) ? '#64748b' : '#fff',
+                            border: 'none',
+                            borderRadius: '6px',
+                            fontWeight: 'bold',
+                            padding: '8px',
+                            fontSize: '11px',
+                            cursor: (!connectNodeA || !connectNodeB || connectNodeA === connectNodeB) ? 'not-allowed' : 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '6px',
+                            transition: 'all 0.15s ease'
+                          }}
+                          id="btn-connect-nodes-3d"
+                        >
+                          ✏️ Połącz węzły prętem
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Free CAD Manual Editor Section */}
                   <div className="properties-panel__section">
                     <div className="properties-panel__section-title">Inspektor CAD 3D</div>
@@ -2010,28 +2187,30 @@ export default function App() {
                               {/* 6-DOF supportRestraints panel */}
                               <div>
                                 <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '600' }}>Więzy podporowe (6-DOF):</span>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginTop: '6px' }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginTop: '8px' }}>
                                   {restraintNames.map((name, idx) => (
-                                    <button
-                                      key={name}
-                                      onClick={() => toggleRestraint(selectedEntity.id, idx)}
-                                      style={{
-                                        padding: '8px 4px',
-                                        fontSize: '11px',
-                                        fontWeight: 'bold',
-                                        borderRadius: '6px',
-                                        border: '1px solid rgba(255,255,255,0.1)',
-                                        cursor: 'pointer',
-                                        background: restraints[idx] 
-                                          ? 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)' 
-                                          : 'rgba(0,0,0,0.3)',
-                                        color: restraints[idx] ? '#fff' : '#64748b',
-                                        boxShadow: restraints[idx] ? '0 0 8px rgba(99, 102, 241, 0.4)' : 'none',
-                                        transition: 'all 0.15s ease'
-                                      }}
-                                    >
-                                      🔗 {name}
-                                    </button>
+                                    <label key={name} style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '6px',
+                                      fontSize: '12px',
+                                      color: restraints[idx] ? '#818cf8' : '#94a3b8',
+                                      cursor: 'pointer',
+                                      background: 'rgba(255,255,255,0.02)',
+                                      padding: '6px 8px',
+                                      borderRadius: '6px',
+                                      border: restraints[idx] ? '1px solid #6366f1' : '1px solid rgba(255,255,255,0.05)',
+                                      fontWeight: restraints[idx] ? 'bold' : 'normal',
+                                      transition: 'all 0.15s ease'
+                                    }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={restraints[idx]}
+                                        onChange={() => toggleRestraint(selectedEntity.id, idx)}
+                                        style={{ cursor: 'pointer', accentColor: '#6366f1' }}
+                                      />
+                                      {name}
+                                    </label>
                                   ))}
                                 </div>
                               </div>
@@ -2081,7 +2260,7 @@ export default function App() {
                                 }}
                               >
                                 <Trash2 size={16} />
-                                Usuń pręt
+                                USUŃ PRĘT
                               </button>
                             </>
                           );
