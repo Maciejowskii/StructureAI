@@ -1,10 +1,11 @@
 import { useRef, useEffect, useState } from 'react';
 
 interface Canvas3DProps {
-  results: any | null;
+  model: any | null;
+  result: any | null;
 }
 
-export default function Canvas3D({ results }: Canvas3DProps) {
+export default function Canvas3D({ model, result }: Canvas3DProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [angleX, setAngleX] = useState(-0.6); // Rotation around Y
   const [angleY, setAngleY] = useState(0.3);  // Rotation around X
@@ -132,9 +133,9 @@ export default function Canvas3D({ results }: Canvas3DProps) {
       return { x: xs, y: ys, zDepth: z2 };
     };
 
-    const model = results?.model;
-    const nodes: any[] = model?.nodes || [];
-    const elements: any[] = model?.elements || [];
+    const geometry = model?.geometry;
+    const nodes: any[] = geometry?.nodes || [];
+    const elements: any[] = geometry?.elements || [];
 
     // Find bounding box to center model
     let minX = 0, maxX = 0, minY = 0, maxY = 0, minZ = 0, maxZ = 0;
@@ -204,19 +205,19 @@ export default function Canvas3D({ results }: Canvas3DProps) {
         const n2 = nodes.find(n => n.id === el.end_node_id);
         if (!n1 || !n2) return null;
 
-        // Start & End projected coordinates (undefomed)
+        // Start & End projected coordinates (undeformed)
         const p1 = project((n1.x - midX) * scaleFactor, (n1.y - midY) * scaleFactor, (n1.z - midZ) * scaleFactor);
         const p2 = project((n2.x - midX) * scaleFactor, (n2.y - midY) * scaleFactor, (n2.z - midZ) * scaleFactor);
 
         // Projected deformed coordinates
         let dp1 = p1;
         let dp2 = p2;
-        if (results && results.nodes) {
-          const resN1 = results.nodes.find((rn: any) => rn.id === n1.id);
-          const resN2 = results.nodes.find((rn: any) => rn.id === n2.id);
+        if (result && result.nodes) {
+          const resN1 = result.nodes.find((rn: any) => rn.id === n1.id);
+          const resN2 = result.nodes.find((rn: any) => rn.id === n2.id);
           if (resN1 && resN2) {
             // Apply exaggeration scale of 100 for displacements visual clarity
-            const exag = 120.0;
+            const exag = 100.0;
             dp1 = project(
               (n1.x + (resN1.ux / 1000.0) * exag - midX) * scaleFactor,
               (n1.y + (resN1.uy / 1000.0) * exag - midY) * scaleFactor,
@@ -259,13 +260,7 @@ export default function Canvas3D({ results }: Canvas3DProps) {
 
         // Draw deformed structure member (main glowing view)
         ctx.shadowColor = isBrace ? '#f97316' : isPurlin ? '#3b82f6' : '#a855f7';
-        ctx.shadowBlur = results ? 8 * brightness : 0;
-        
-        ctx.strokeStyle = isBrace 
-          ? `rgba(249, 115, 22, ${brightness})` 
-          : isPurlin 
-            ? `rgba(59, 130, 246, ${brightness * 0.7})` 
-            : `rgba(168, 85, 2 purple, ${brightness})`; // fallback text or HSL
+        ctx.shadowBlur = result ? 8 * brightness : 0;
         
         // HSL tailored palette
         ctx.strokeStyle = isBrace 
@@ -283,7 +278,7 @@ export default function Canvas3D({ results }: Canvas3DProps) {
         ctx.shadowBlur = 0; // Reset glow
 
         // Draw Bending Moment 3D Shaded Ribbons
-        const resEl = results?.elements?.find((r: any) => r.id === el.id);
+        const resEl = result?.elements?.find((r: any) => r.id === el.id);
         if (resEl && !isBrace && !isPurlin) {
           // Exaggeration scale for visual clarity of moments
           const scaleMoment = 0.5; 
@@ -337,11 +332,9 @@ export default function Canvas3D({ results }: Canvas3DProps) {
         }
       });
 
-      // 4. Draw Nodal support/load markers on top
+      // 4. Draw Nodal support markers
       nodes.forEach(n => {
         const px = project((n.x - midX) * scaleFactor, (n.y - midY) * scaleFactor, (n.z - midZ) * scaleFactor);
-        
-        // Draw supports
         if (n.support_type === 'Fixed') {
           ctx.fillStyle = '#ef4444';
           ctx.beginPath();
@@ -358,10 +351,10 @@ export default function Canvas3D({ results }: Canvas3DProps) {
       });
     }
 
-  }, [results, angleX, angleY, zoom]);
+  }, [model, result, angleX, angleY, zoom]);
 
-  const maxDisp = results && results.nodes && results.nodes.length > 0
-    ? Math.max(...results.nodes.map((rn: any) => Math.sqrt(rn.ux*rn.ux + rn.uy*rn.uy + rn.uz*rn.uz)))
+  const maxDisp = result && result.nodes && result.nodes.length > 0
+    ? Math.max(...result.nodes.map((rn: any) => Math.sqrt(rn.ux*rn.ux + rn.uy*rn.uy + rn.uz*rn.uz)))
     : 0.0;
 
   return (
@@ -388,7 +381,7 @@ export default function Canvas3D({ results }: Canvas3DProps) {
         pointerEvents: 'none'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-          <span style={{ fontSize: '18px', animation: 'pulse 2s infinite' }}>⚡</span>
+          <span style={{ fontSize: '18px' }}>⚡</span>
           <span style={{ fontWeight: 'bold', fontSize: '12px', color: '#c4b5fd', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
             Silnik MES 3D Aktywny
           </span>
@@ -397,15 +390,15 @@ export default function Canvas3D({ results }: Canvas3DProps) {
           Parametry ramy portalowej przeliczane na żywo z pełną macierzą sztywności ramy przestrzennej 12x12.
         </div>
         
-        {results && (
+        {result && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '11px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '10px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ color: '#64748b' }}>Liczba węzłów:</span>
-              <span style={{ color: '#fff', fontWeight: 'bold' }}>{results.model?.nodes?.length}</span>
+              <span style={{ color: '#fff', fontWeight: 'bold' }}>{model?.geometry?.nodes?.length}</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ color: '#64748b' }}>Pręty ramy:</span>
-              <span style={{ color: '#fff', fontWeight: 'bold' }}>{results.model?.elements?.length}</span>
+              <span style={{ color: '#fff', fontWeight: 'bold' }}>{model?.geometry?.elements?.length}</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ color: '#64748b' }}>Maks. ugięcie:</span>

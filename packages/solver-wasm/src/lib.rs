@@ -197,10 +197,17 @@ pub struct Load3D {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct DistributedLoad3D {
+    pub element_id: String,
+    pub value: f64, // Uniform distributed load in N/m (negative downwards)
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct InputModel3D {
     pub nodes: Vec<Node3D>,
     pub elements: Vec<Element3D>,
     pub loads: Vec<Load3D>,
+    pub distributed_loads: Vec<DistributedLoad3D>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -266,6 +273,94 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         }
     }
 
+    // Apply distributed element loads (Equivalent Nodal Forces)
+    for load in &input_model.distributed_loads {
+        let el_idx = match input_model.elements.iter().position(|e| e.id == load.element_id) {
+            Some(idx) => idx,
+            None => continue,
+        };
+        let el = &input_model.elements[el_idx];
+
+        let start_idx = input_model.nodes.iter().position(|n| n.id == el.start_node_id).unwrap();
+        let end_idx = input_model.nodes.iter().position(|n| n.id == el.end_node_id).unwrap();
+
+        let n1 = &input_model.nodes[start_idx];
+        let n2 = &input_model.nodes[end_idx];
+
+        let dx = n2.x - n1.x;
+        let dy = n2.y - n1.y;
+        let dz = n2.z - n1.z;
+        let l = (dx * dx + dy * dy + dz * dz).sqrt();
+
+        if l < 1e-9 {
+            continue;
+        }
+
+        // Angle alpha relative to horizontal plane
+        let d_xz = (dx * dx + dz * dz).sqrt();
+        let cos_alpha = d_xz / l;
+        let sin_alpha = dy / l;
+
+        // Global downward vertical uniform load q (N/m)
+        let q = load.value;
+
+        // Transform to local elements: y' causes bending, x' causes axial load
+        let q_local_y = q * cos_alpha;
+        let q_local_x = q * sin_alpha;
+
+        // Local equivalent nodal forces
+        let f_y1 = q_local_y * l / 2.0;
+        let m_z1 = q_local_y * l * l / 12.0;
+        let f_y2 = q_local_y * l / 2.0;
+        let m_z2 = -q_local_y * l * l / 12.0;
+
+        let f_x1 = q_local_x * l / 2.0;
+        let f_x2 = q_local_x * l / 2.0;
+
+        let mut f_local = DVector::<f64>::zeros(12);
+        f_local[0] = f_x1;
+        f_local[1] = f_y1;
+        f_local[5] = m_z1;
+        f_local[6] = f_x2;
+        f_local[7] = f_y2;
+        f_local[11] = m_z2;
+
+        // Rotation matrix r and T
+        let mut r = nalgebra::Matrix3::<f64>::zeros();
+        let vx = nalgebra::Vector3::new(dx / l, dy / l, dz / l);
+        let vy: nalgebra::Vector3<f64>;
+        let vz: nalgebra::Vector3<f64>;
+
+        if (dx.abs() < 1e-5) && (dz.abs() < 1e-5) {
+            vz = nalgebra::Vector3::new(0.0, 0.0, 1.0);
+            vy = vz.cross(&vx).normalize();
+        } else {
+            let v_up = nalgebra::Vector3::new(0.0, 1.0, 0.0);
+            vz = vx.cross(&v_up).normalize();
+            vy = vz.cross(&vx);
+        }
+
+        r[(0, 0)] = vx.x; r[(0, 1)] = vx.y; r[(0, 2)] = vx.z;
+        r[(1, 0)] = vy.x; r[(1, 1)] = vy.y; r[(1, 2)] = vy.z;
+        r[(2, 0)] = vz.x; r[(2, 1)] = vz.y; r[(2, 2)] = vz.z;
+
+        let mut t = DMatrix::<f64>::zeros(12, 12);
+        for i in 0..4 {
+            t.fixed_view_mut::<3, 3>(i * 3, i * 3).copy_from(&r);
+        }
+
+        let f_global_el = t.transpose() * f_local;
+
+        let dof_map = [
+            start_idx * 6 + 0, start_idx * 6 + 1, start_idx * 6 + 2, start_idx * 6 + 3, start_idx * 6 + 4, start_idx * 6 + 5,
+            end_idx * 6 + 0, end_idx * 6 + 1, end_idx * 6 + 2, end_idx * 6 + 3, end_idx * 6 + 4, end_idx * 6 + 5,
+        ];
+
+        for r_i in 0..12 {
+            f_global[dof_map[r_i]] += f_global_el[r_i];
+        }
+    }
+
     // Element assembly
     for el in &input_model.elements {
         let start_idx = match input_model.nodes.iter().position(|n| n.id == el.start_node_id) {
@@ -289,36 +384,24 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
             continue;
         }
 
-        // Calculate rotation matrix R (3x3)
+        // Calculate rotation matrix R (3x3) using robust cross-product
         let mut r = nalgebra::Matrix3::<f64>::zeros();
-        let vx_x = dx / l;
-        let vx_y = dy / l;
-        let vx_z = dz / l;
+        let vx = nalgebra::Vector3::new(dx / l, dy / l, dz / l);
+        let vy: nalgebra::Vector3<f64>;
+        let vz: nalgebra::Vector3<f64>;
 
-        // If member is vertical
-        if (vx_x.abs() < 1e-5) && (vx_z.abs() < 1e-5) {
-            let sign = if vx_y > 0.0 { 1.0 } else { -1.0 };
-            r[(0, 1)] = sign;
-            r[(1, 0)] = -sign;
-            r[(2, 2)] = 1.0;
+        if (dx.abs() < 1e-5) && (dz.abs() < 1e-5) {
+            vz = nalgebra::Vector3::new(0.0, 0.0, 1.0);
+            vy = vz.cross(&vx).normalize();
         } else {
-            let cx = vx_x;
-            let cy = vx_y;
-            let cz = vx_z;
-            let d_xz = (cx * cx + cz * cz).sqrt();
-
-            r[(0, 0)] = cx;
-            r[(0, 1)] = cy;
-            r[(0, 2)] = cz;
-
-            r[(1, 0)] = -cx * cy / d_xz;
-            r[(1, 1)] = d_xz;
-            r[(1, 2)] = -cy * cz / d_xz;
-
-            r[(2, 0)] = -cz / d_xz;
-            r[(2, 1)] = 0.0;
-            r[(2, 2)] = cx / d_xz;
+            let v_up = nalgebra::Vector3::new(0.0, 1.0, 0.0);
+            vz = vx.cross(&v_up).normalize();
+            vy = vz.cross(&vx);
         }
+
+        r[(0, 0)] = vx.x; r[(0, 1)] = vx.y; r[(0, 2)] = vx.z;
+        r[(1, 0)] = vy.x; r[(1, 1)] = vy.y; r[(1, 2)] = vy.z;
+        r[(2, 0)] = vz.x; r[(2, 1)] = vz.y; r[(2, 2)] = vz.z;
 
         // Local 12x12 stiffness matrix
         let mut k_local = DMatrix::<f64>::zeros(12, 12);
@@ -397,7 +480,6 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
                 k_global[(idx * 6 + d, idx * 6 + d)] += penalty;
             }
         } else if node.support_type == "Pinned" {
-            // Block vertical/horizontal displacements but allow rotations
             for d in 0..3 {
                 k_global[(idx * 6 + d, idx * 6 + d)] += penalty;
             }
@@ -444,35 +526,24 @@ pub fn solve_mesh_3d_internal(input_model: &InputModel3D) -> SolverOutput3D {
         let dz = n2.z - n1.z;
         let l = (dx * dx + dy * dy + dz * dz).sqrt();
 
-        // Calculate rotation matrix R
+        // Calculate rotation matrix R using robust cross-product
         let mut r = nalgebra::Matrix3::<f64>::zeros();
-        let vx_x = dx / l;
-        let vx_y = dy / l;
-        let vx_z = dz / l;
+        let vx = nalgebra::Vector3::new(dx / l, dy / l, dz / l);
+        let vy: nalgebra::Vector3<f64>;
+        let vz: nalgebra::Vector3<f64>;
 
-        if (vx_x.abs() < 1e-5) && (vx_z.abs() < 1e-5) {
-            let sign = if vx_y > 0.0 { 1.0 } else { -1.0 };
-            r[(0, 1)] = sign;
-            r[(1, 0)] = -sign;
-            r[(2, 2)] = 1.0;
+        if (dx.abs() < 1e-5) && (dz.abs() < 1e-5) {
+            vz = nalgebra::Vector3::new(0.0, 0.0, 1.0);
+            vy = vz.cross(&vx).normalize();
         } else {
-            let cx = vx_x;
-            let cy = vx_y;
-            let cz = vx_z;
-            let d_xz = (cx * cx + cz * cz).sqrt();
-
-            r[(0, 0)] = cx;
-            r[(0, 1)] = cy;
-            r[(0, 2)] = cz;
-
-            r[(1, 0)] = -cx * cy / d_xz;
-            r[(1, 1)] = d_xz;
-            r[(1, 2)] = -cy * cz / d_xz;
-
-            r[(2, 0)] = -cz / d_xz;
-            r[(2, 1)] = 0.0;
-            r[(2, 2)] = cx / d_xz;
+            let v_up = nalgebra::Vector3::new(0.0, 1.0, 0.0);
+            vz = vx.cross(&v_up).normalize();
+            vy = vz.cross(&vx);
         }
+
+        r[(0, 0)] = vx.x; r[(0, 1)] = vx.y; r[(0, 2)] = vx.z;
+        r[(1, 0)] = vy.x; r[(1, 1)] = vy.y; r[(1, 2)] = vy.z;
+        r[(2, 0)] = vz.x; r[(2, 1)] = vz.y; r[(2, 2)] = vz.z;
 
         // Local displacement vector u_local_el
         let mut u_global_el = DVector::<f64>::zeros(12);
@@ -1240,7 +1311,7 @@ mod tests {
             }
         ];
 
-        let model = InputModel3D { nodes, elements, loads };
+        let model = InputModel3D { nodes, elements, loads, distributed_loads: vec![] };
         let output = solve_mesh_3d_internal(&model);
 
         assert!(output.success);

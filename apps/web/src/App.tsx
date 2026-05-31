@@ -177,6 +177,7 @@ export default function App() {
   const [length3D, setLength3D] = useState(6.0); // L (m)
   const [bays3D, setBays3D] = useState(2); // n_bays
   const [results3D, setResults3D] = useState<any | null>(null);
+  const [inputModel3D, setInputModel3D] = useState<any | null>(null);
 
   // Initialize WASM
   useEffect(() => {
@@ -519,12 +520,31 @@ export default function App() {
       });
     }
 
-    return { nodes, elements, loads };
+    const distributed_loads: any[] = [];
+    for (let b = 0; b <= bays; b++) {
+      distributed_loads.push({
+        element_id: `Raf_L_${b}`,
+        value: -1200.0, // -1.2 kN/m vertical distributed load
+      });
+      distributed_loads.push({
+        element_id: `Raf_R_${b}`,
+        value: -1200.0, // -1.2 kN/m vertical distributed load
+      });
+    }
+
+    return {
+      nodes,
+      elements,
+      geometry: { nodes, elements },
+      loads,
+      distributed_loads
+    };
   }, []);
 
   const solve3D = useCallback(() => {
     const bayLength = length3D / bays3D;
     const inputModel3D = generateParametricModel3D(width3D, height3D, slope3D, bayLength, bays3D);
+    setInputModel3D(inputModel3D);
     if (solveMesh3dFn) {
       const startTime = performance.now();
       const output = solveMesh3dFn(inputModel3D);
@@ -866,7 +886,7 @@ export default function App() {
         {/* ----- Canvas Area ----- */}
         <div className="canvas-area canvas-grid">
           {appMode === '3d' ? (
-            <Canvas3D results={results3D} />
+            <Canvas3D model={inputModel3D} result={results3D} />
           ) : !results ? (
             <div className="welcome-overlay">
               <div className="welcome-overlay__icon">🏗</div>
